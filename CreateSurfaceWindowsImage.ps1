@@ -1,9 +1,9 @@
 ﻿<#
 .SYNOPSIS
-    This script downloads the ADK and WinPE addon.
+    This script creates a Surface Windows image.
 
 .DESCRIPTION
-    This script downloads the ADK and WinPE addon, uninstalls any previous versions and installs the version referenced by the aka.ms link in the script.
+    This script creates a Surface Windows image, including Office 365 and requisite Visual C runtime libraries as required.
 
     
     // *************
@@ -18,12 +18,16 @@
     In other words, if you break it, you get to keep the pieces.
     
 .EXAMPLE
-    .\CreateSurfaceWindowsImage.ps1 -ISO <ISO path> -OSSKU Pro -Device SurfacePro7
+    .\CreateSurfaceWindowsImage.ps1 -ISO <ISO path> -OSSKU Pro -DestinationFolder "C:\Temp" -Device SurfacePro7
 
 .NOTES
     Author:       Microsoft
-    Last Update:  6th May 2020
-    Version:      1.1.0
+    Last Update:  14th May 2020
+    Version:      1.2.0
+
+    Version 1.2.0
+    - Added support for including Office 365 into images
+    - Bugfixes / performance improvements
 
     Version 1.1.0
     - Added support for local driver paths
@@ -93,12 +97,26 @@ Param(
     [Parameter(
         Position=8,
         Mandatory=$False,
+        HelpMessage="Add latest cumulative .NET update (bool true/false, default is true)"
+        )]
+        [bool]$CumulativeDotNetUpdate = $True,
+
+    [Parameter(
+        Position=9,
+        Mandatory=$False,
         HelpMessage="Add latest Adobe Flash Player Security update (bool true/false, default is true)"
         )]
         [bool]$AdobeFlashUpdate = $True,
 
     [Parameter(
-        Position=9,
+        Position=10,
+        Mandatory=$False,
+        HelpMessage="Add Office 365 C2R (bool true/false, default is false)"
+        )]
+        [bool]$Office365 = $False,
+
+    [Parameter(
+        Position=11,
         Mandatory=$False,
         HelpMessage="Surface device type to add drivers to image for, if not specified no drivers injected - Custom can be used if using with a non-Surface device"
         )]
@@ -106,63 +124,63 @@ Param(
         [string]$Device = "SurfacePro7",
 
     [Parameter(
-        Position=10,
+        Position=12,
         Mandatory=$False,
         HelpMessage="Create USB key when finished (bool true/false, default is false)"
         )]
         [bool]$CreateUSB = $False,
 
     [Parameter(
-        Position=11,
+        Position=13,
         Mandatory=$False,
         HelpMessage="Create bootable ISO file (useful for testing) when finished (bool true/false, default is false)"
         )]
         [bool]$CreateISO = $False,
 
     [Parameter(
-        Position=12,
+        Position=14,
         Mandatory=$False,
         HelpMessage="Location of Windows ADK installation"
         )]
         [string]$WindowsKitsInstall = "${env:ProgramFiles(x86)}\Windows Kits\10\Assessment and Deployment Kit",
 
     [Parameter(
-        Position=13,
+        Position=15,
         Mandatory=$False,
         HelpMessage="Use BITS for downloads"
         )]
         [bool]$BITSTransfer = $True,
 
     [Parameter(
-        Position=14,
+        Position=16,
         Mandatory=$False,
         HelpMessage="Edit Install.wim"
         )]
         [bool]$InstallWIM = $True,
 
     [Parameter(
-        Position=15,
+        Position=17,
         Mandatory=$False,
         HelpMessage="Edit boot.wim"
         )]
         [bool]$BootWIM = $True,
 
     [Parameter(
-        Position=16,
+        Position=18,
         Mandatory=$False,
         HelpMessage="Keep original unsplit WIM even if resulting image size >4GB (bool true false, default is true)"
         )]
         [bool]$KeepOriginalWIM = $True,
 
     [Parameter(
-        Position=17,
+        Position=19,
         Mandatory=$False,
         HelpMessage="Use a local driver path instead of downloading an MSI (bool true false, default is false)"
         )]
         [bool]$UseLocalDriverPath = $False,
 
     [Parameter(
-        Position=18,
+        Position=20,
         Mandatory=$False,
         HelpMessage="Path to an extracted driver folder - required if you set UseLocalDriverPath variable to true or script will not find any drivers to inject"
         )]
@@ -376,8 +394,8 @@ Function PrereqCheck
         If ($global:IsInstalled -eq $null)
         {
             # ADK cannot do an "in place" upgrade.  Do we need to uninstall the old version?
-            $uninstall32 = gci "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall" | ForEach { gp $_.PSPath } | ? { $_ -like "*Assessment and Deployment*" } | select UninstallString
-            $uninstall64 = gci "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" | ForEach { gp $_.PSPath } | ? { $_ -like "*Assessment and Deployment*" } | select UninstallString
+            $uninstall32 = Get-ChildItem "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall" | ForEach { gp $_.PSPath } | ? { $_ -like "*Assessment and Deployment*" } | select UninstallString
+            $uninstall64 = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" | ForEach { gp $_.PSPath } | ? { $_ -like "*Assessment and Deployment*" } | select UninstallString
 
             If ($uninstall64) 
             {
@@ -527,7 +545,7 @@ Function Download-LatestUpdates
         {
             $global:KBGUID = $array | Where-Object {($_.description -like "*$Date*") -and ($_.description -like "*Security Update for Adobe Flash Player for Windows 10*") -and ($_.description -like "*$OSBuild*")}
         }
-        
+
         $updatesFound = $false
 
         ForEach ($Object in $global:KBGUID)
@@ -541,7 +559,17 @@ Function Download-LatestUpdates
             
             ## Fetch and parse the download URL
             $PostRes = (Invoke-WebRequest -Uri 'http://www.catalog.update.microsoft.com/DownloadDialog.aspx' -Method Post -Body $postBody).content
-            $DownloadLinks = ($PostRes | Select-String -AllMatches -Pattern "(http[s]?\://download\.windowsupdate\.com\/[^\'\""]*)" | Select-Object -Unique | ForEach-Object { [PSCustomObject] @{ Source = $_.matches.value } } ).source
+            ## Seeing two potentially different hosts serving download links:
+            $DLWUDOTCOM = ($PostRes | Select-String -AllMatches -Pattern "(http[s]?\://download\.windowsupdate\.com\/[^\'\""]*)" | Select-Object -Unique | ForEach-Object { [PSCustomObject] @{ Source = $_.matches.value } } ).source
+            $DLDELDOTCOM = ($PostRes | Select-String -AllMatches -Pattern "(http[s]?\://dl\.delivery\.mp\.microsoft\.com\/[^\'\""]*)" | Select-Object -Unique | ForEach-Object { [PSCustomObject] @{ Source = $_.matches.value } } ).source
+            If ($DLWUDOTCOM)
+            {
+                $DownloadLinks = $DLWUDOTCOM
+            }
+            ElseIf ($DLDELDOTCOM)
+            {
+                $DownloadLinks = $DLDELDOTCOM
+            }
             If ($DownloadLinks)
             {
                 $updatesFound = $true
@@ -576,11 +604,10 @@ Function Download-LatestUpdates
                 }
             }
         }
-        
-        if(!($updatesFound))
+
+        If (!($updatesFound))
         {
             $global:KBGUID = $null
-            Write-Output "No update found." | Receive-Output -Color Yellow
         }
     }
 }
@@ -793,7 +820,7 @@ Function Get-LatestSurfaceEthernetDrivers
 
     $DeviceDriverPath = "$TempFolder\$Device"
 
-    If ($Device -eq "SurfaceHub2S")
+    If (!($Device))
     {
         # Nothing yet
     }
@@ -862,10 +889,15 @@ Function Get-LatestSurfaceEthernetDrivers
                         Write-Output $curTxt | Receive-Output -Color White
                         Write-Output ""
                         Write-Output ""
-                        DownloadFile -URL $URL -Path "$DeviceDriverPath"
+                        $TempCAB = DownloadFile -URL $URL -Path "$DeviceDriverPath"
                         Write-Output ""
                         Write-Output ""
                         Write-Output ""
+                        Write-Output ""
+                        Write-Output ""
+                        $expand = "$env:WINDIR\System32\expand.exe"
+                        $args = "-f:* $TempCAB $DeviceDriverPath"
+                        Start-Process -FilePath $expand -ArgumentList $args -Wait -NoNewWindow
                         Write-Output ""
                         Write-Output ""
                     }
@@ -876,10 +908,15 @@ Function Get-LatestSurfaceEthernetDrivers
                     Write-Output $curTxt | Receive-Output -Color White
                     Write-Output ""
                     Write-Output ""
-                    DownloadFile -URL $DownloadLinks -Path "$DeviceDriverPath"
+                    $TempCAB = DownloadFile -URL $DownloadLinks -Path "$DeviceDriverPath"
                     Write-Output ""
                     Write-Output ""
                     Write-Output ""
+                    Write-Output ""
+                    Write-Output ""
+                    $expand = "$env:WINDIR\System32\expand.exe"
+                    $args = "-f:* $TempCAB $DeviceDriverPath"
+                    Start-Process -FilePath $expand -ArgumentList $args -Wait -NoNewWindow
                     Write-Output ""
                     Write-Output ""
                 }
@@ -985,6 +1022,7 @@ Function Get-LatestVCRuntimes
     {
         New-Item -path "$VisualCRuntimePath\2013" -ItemType "directory" | Out-Null
     }
+    <#
     If (!(Test-Path "$VisualCRuntimePath\2015"))
     {
         New-Item -path "$VisualCRuntimePath\2015" -ItemType "directory" | Out-Null
@@ -993,16 +1031,18 @@ Function Get-LatestVCRuntimes
     {
         New-Item -path "$VisualCRuntimePath\2017" -ItemType "directory" | Out-Null
     }
+    #>
+    If (!(Test-Path "$VisualCRuntimePath\2019"))
+    {
+        New-Item -path "$VisualCRuntimePath\2019" -ItemType "directory" | Out-Null
+    }
 
     Write-Output "Downloading latest VisualC++ Runtimes..." | Receive-Output -Color White
 
     $VC2013x86URL = "https://aka.ms/vcpp2013x86"
     $VC2013x64URL = "https://aka.ms/vcpp2013x64"
-    $VC2015x86URL = "https://aka.ms/vcpp2015x86"
-    $VC2015x64URL = "https://aka.ms/vcpp2015x64"
-    $VC2017X86URL = "https://aka.ms/vcpp2017x86"
-    $VC2017X64URL = "https://aka.ms/vcpp2017x64"
-
+    $VC2019X86URL = "https://aka.ms/vcpp2019x86"
+    $VC2019X64URL = "https://aka.ms/vcpp2019x64"
 
     # 2013
     $VC2013x86 = DownloadFile -URL $VC2013x86URL -Path "$VisualCRuntimePath\2013"
@@ -1011,23 +1051,77 @@ Function Get-LatestVCRuntimes
     $VC2013x64 = DownloadFile -URL $VC2013x64URL -Path "$VisualCRuntimePath\2013"
     Write-Output "Downloaded File: $VC2013x64"
     Write-Output ""
+    # 2019
+    $VC2019x86 = DownloadFile -URL $VC2019x86URL -Path "$VisualCRuntimePath\2019"
+    Write-Output "Downloaded File: $VC2019x86"
+    Write-Output ""
+    $VC2019x64 = DownloadFile -URL $VC2019x64URL -Path "$VisualCRuntimePath\2019"
+    Write-Output "Downloaded File: $VC2019x64"
+    Write-Output ""
+}
 
-    # 2015
-    $VC2015x86 = DownloadFile -URL $VC2015x86URL -Path "$VisualCRuntimePath\2015"
-    Write-Output "Downloaded File: $VC2015x86"
+
+
+Function Get-Office365
+{
+    Param(
+        [string]$TempFolder
+    )
+
     Write-Output ""
-    $VC2015x64 = DownloadFile -URL $VC2015x64URL -Path "$VisualCRuntimePath\2015"
-    Write-Output "Downloaded File: $VC2015x64"
     Write-Output ""
+    Write-Output ""
+
+    $Office365Path = "$TempFolder\Office365"
+
+    If (Test-Path "$Office365Path")
+    {
+        Write-Output "Deleting $Office365Path\..." | Receive-Output -Color Gray
+        Get-ChildItem -Path "$Office365Path" -Recurse | Remove-Item -Force -Recurse
+        Remove-Item -Path "$Office365Path" -Force    
+    }
+    If (!(Test-Path "$Office365Path"))
+    {
+        New-Item -Path "$Office365Path" -ItemType "directory" | Out-Null
+    }
+
+    Write-Output "Downloading Office 365 $Office365SKU..." | Receive-Output -Color White
     
-    # 2017
-    $VC2017x86 = DownloadFile -URL $VC2017x86URL -Path "$VisualCRuntimePath\2017"
-    Write-Output "Downloaded File: $VC2017x86"
+    $Office365OfflineURL = "https://aka.ms/sdao365"
+
+    $Office365TempFile = DownloadFile -URL $Office365OfflineURL -Path "$Office365Path"
+    Write-Output "Downloaded File: $Office365TempFile" | Receive-Output -Color White
     Write-Output ""
-    $VC2017x64 = DownloadFile -URL $VC2017x64URL -Path "$VisualCRuntimePath\2017"
-    Write-Output "Downloaded File: $VC2017x64"
+
+    Write-Output "Extracting Office 365 offline installer..." | Receive-Output -Color White
+    Start-Process -FilePath "$Office365TempFile" -ArgumentList "/extract:$Office365Path /quiet" -Wait
     Write-Output ""
-    
+
+    If (!(Test-Path "$Office365Path\setup.exe"))
+    {
+        #File not downloaded, bail
+        Exit
+    }
+    Else
+    {
+        $O365ProPlusDownloadXMLPath = "$WorkingDirPath\O365_Download.xml"
+        $O365ProPlusConfigurationXMLPath = "$WorkingDirPath\O365_Configuration.xml"
+        Copy-Item -Path $O365ProPlusDownloadXMLPath -Destination $Office365Path
+        Copy-Item -Path $O365ProPlusConfigurationXMLPath -Destination $Office365Path
+        
+        $TempFile = "$Office365Path\O365_Download.xml"
+        If (Test-Path $TempFile)
+        {
+            $O365ProPlusDownloadXMLPath = "$Office365Path\O365_Download.xml"
+        }
+        Write-Output "Downloading Office 365 offline package..." | Receive-Output -Color White
+        $Argumentlist = "/download $O365ProPlusDownloadXMLPath"
+        Set-Location -Path "$Office365Path"
+        Start-Process -FilePath "$Office365Path\setup.exe" -ArgumentList $Argumentlist -Wait -WindowStyle Hidden
+    }
+    Write-Output ""
+    Write-Output ""
+    Write-Output ""
 }
 
 
@@ -1185,23 +1279,41 @@ Function Get-OSWIMFromISO
         }
         Else
         {
-            $ImagePath = $OSWIM.ImagePath
             $ImageIndex = $OSWIM.ImageIndex
+            $ImagePath = $OSWIM.ImagePath
+            $OSWIM = Get-WindowsImage -ImagePath $ImagePath -Index $ImageIndex
             $ImageName = $OSWIM.ImageName
-
+            $ImageVersion = $OSWIM.Version
+            $ImageArch = $OSWIM.Architecture
+            If ($ImageArch -eq "0")
+            {
+                $ImageArch = "x86"
+            }
+            If ($ImageArch -eq "9")
+            {
+                $ImageArch = "x64"
+            }
+            ElseIf ($ImageArch -eq "Unknown")
+            {
+                $ImageArch = "ARM64"
+            }
+            
             Write-Output "Found image matching $OSSKU :" | Receive-Output -Color Gray
-            Write-Output "Image Path:  $ImagePath" | Receive-Output -Color White
-            Write-Output "Image Index: $ImageIndex" | Receive-Output -Color White
-            Write-Output "Image Name:  $ImageName" | Receive-Output -Color White
+            Write-Output "Path:          $ImagePath" | Receive-Output -Color White
+            Write-Output "Index:         $ImageIndex" | Receive-Output -Color White
+            Write-Output "Name:          $ImageName" | Receive-Output -Color White
+            Write-Output "Version:       $ImageVersion" | Receive-Output -Color White
+            Write-Output "Architecture:  $ImageArch" | Receive-Output -Color White
+            Write-Output ""
 
             If (($ImageName -like "*$($OSSKU)") -or ($ImageName -like "*$($OSSKU) Evaluation") -or ($ImageName -like "*$OSSKU) LTSC"))
             {
-                $global:OSVersion = (Get-WindowsImage -ImagePath "$ImagePath" -Index "$ImageIndex").Version
+                $global:OSVersionFull = (Get-WindowsImage -ImagePath "$ImagePath" -Index "$ImageIndex").Version
                 $OSWIMFound = $True
             }
-            If ($global:OSVersion)
+            If ($global:OSVersionFull)
             {
-                $global:OSVersion = $global:OSVersion.Substring(0, $global:OSVersion.LastIndexOf('.'))
+                $global:OSVersion = $global:OSVersionFull.Substring(0, $global:OSVersionFull.LastIndexOf('.'))
                 Write-Output "Mounting $ImagePath in $ScratchMountFolder..." | Receive-Output -Color White
                 Mount-WindowsImage -ImagePath $ImagePath -Index $ImageIndex -Path $ScratchMountFolder -ReadOnly | Out-Null
                 Start-Sleep 5
@@ -1276,18 +1388,52 @@ Function Get-OSWIMFromISO
     If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim")
     {
         $ExistingInstallWIM = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim"
-        $TempExistingInstallWIM = Get-WindowsImage -ImagePath $ExistingInstallWIM | Where-Object {$_.ImageName -like "*$($OSSKU)"}
+        $TempExistingInstallWIM = Get-WindowsImage -ImagePath $ExistingInstallWIM | Where-Object {($_.ImageName -like "*$($OSSKU)") -or ($_.ImageName -like "*$($OSSKU) Evaluation") -or ($_.ImageName -like "*$OSSKU) LTSC")}
         $TempExistingInstallWIMPath = $TempExistingInstallWIM.ImagePath
         $TempExistingInstallWIMIndex = $TempExistingInstallWIM.ImageIndex
         $TempExistingInstallWIMName = $TempExistingInstallWIM.ImageName
 
-        If ($TempExistingInstallWIMName -like "*$($OSSKU)")
+        If ($TempExistingInstallWIMName -like "*$($OSSKU)*")
         {
-            $TempExistingInstallWIMOSVersion = (& $DISMFile /Get-WimInfo /WimFile:$TempExistingInstallWIMPath /index:$TempExistingInstallWIMIndex | Select-String "Version ").ToString().Split(":")[1].Trim()
-            If ($TempExistingInstallWIMOSVersion -eq $global:OSVersion)
+            Write-Output "Found existing WIM..."
+            $TempExistingInstallWIMOSVersionFull = (Get-WindowsImage -ImagePath "$TempExistingInstallWIMPath" -Index "$TempExistingInstallWIMIndex").Version
+            #$TempExistingInstallWIMOSVersionFull = (& $DISMFile /Get-WimInfo /WimFile:$TempExistingInstallWIMPath /index:$TempExistingInstallWIMIndex | Select-String "Version ").ToString().Split(":")[1].Trim()
+            $TempExistingInstallWIMOSVersion = $TempExistingInstallWIMOSVersionFull.Substring(0, $TempExistingInstallWIMOSVersionFull.LastIndexOf('.'))
+            Write-Output "Mounting $TempExistingInstallWIMPath in $ScratchMountFolder..." | Receive-Output -Color White
+            Mount-WindowsImage -ImagePath $TempExistingInstallWIMPath -Index $TempExistingInstallWIMIndex -Path $ScratchMountFolder -ReadOnly | Out-Null
+            Start-Sleep 5
+            Write-Output "Querying image registry for ReleaseId..." | Receive-Output -Color White
+            & reg.exe load "HKLM\Mount" "$ScratchMountFolder\Windows\system32\config\SOFTWARE"
+            $Key = "HKLM:\Mount\Microsoft\Windows NT\CurrentVersion"
+            $TempExistingInstallWIMReleaseID = (Get-ItemProperty -Path $Key -Name ReleaseId).ReleaseId
+            Start-Sleep 5
+            Write-Output "Unloading image registry..." | Receive-Output -Color White
+            & reg.exe unload "HKLM\Mount"
+            Start-Sleep 5
+            Write-Output "Dismounting $ScratchMountFolder..."
+            Dismount-WindowsImage -Path $ScratchMountFolder  -Discard | Out-Null
+            Write-Output ""
+            # Specific 1909 check as it will report as 10.0.18362 still when offline
+            If ($TempExistingInstallWIMReleaseID -eq "1909")
             {
-                $LeaveInstallWIM = $True
-                Write-Output "Leaving existing install.wim in $ExistingInstallWIM" | Receive-Output -Color Gray
+                $TempExistingInstallWIMOSVersion = "10.0.18363"
+            }
+
+            If ($TempExistingInstallWIMReleaseID -eq $global:ReleaseId)
+            {            
+                Write-Output "Existing WIM version: $TempExistingInstallWIMOSVersionFull"
+                Write-Output "Checking against ISO WIM version $global:OSVersionFull..."
+                If ($TempExistingInstallWIMOSVersionFull -eq $global:OSVersionFull)
+                {
+                    $LeaveInstallWIM = $True
+                    Write-Output "Leaving existing install.wim in $ExistingInstallWIM, $TempExistingInstallWIMOSVersionFull equals $global:OSVersionFull." | Receive-Output -Color Gray
+                    Write-Output ""
+                }
+                Else
+                {
+                    Write-Output "Copying WIM from ISO, as existing WIM $ExistingInstallWIM does not match $global:OSVersion."
+                    Write-Output ""
+                }
             }
         }
         Else
@@ -1326,7 +1472,6 @@ Function Get-OSWIMFromISO
         $ImagePath = $PEWIM.ImagePath
         $ImageIndex = $PEWIM.ImageIndex
         $ImageName = $PEWIM.ImageName
-        $global:WinPEVersion = (& $DISMFile /Get-WimInfo /WimFile:$ImagePath /index:$ImageIndex | Select-String "Version ").ToString().Split(":")[1].Trim()
     }
 
     If ($DotNet35 -eq $true)
@@ -1358,10 +1503,6 @@ Function Get-OSWIMFromISO
     Dismount-DiskImage -ImagePath $ISO | Out-Null
 
     Write-Output ""
-    Write-Output ""
-    Write-Output ""
-    Write-Output ""
-    Write-Output ""
 }
 
 
@@ -1371,25 +1512,29 @@ Function Add-PackageIntoWindowsImage
     Param(
         [string]$ImageMountFolder,
         [string]$PackagePath,
-        [string]$TempImagePath
+        [string]$TempImagePath,
+        [bool]$DismountImageOnCompletion = $true
     )
 
     Add-WindowsPackage -Path $ImageMountFolder -PackagePath $PackagePath
     Write-Output ""
     Write-Output ""
 
-    # Dismount the image to avoid PSFX/non-PSFX update compression issues in RS5+
-    Write-Output "Saving $TempImagePath..." | Receive-Output -Color White
-    DisMount-WindowsImage -Path $ImageMountFolder -Save -CheckIntegrity
-    Write-Output ""
-    Write-Output ""
-    Start-Sleep 2
+    If ($DismountImageOnCompletion -eq $True)
+    {
+        # Dismount the image to avoid PSFX/non-PSFX update compression issues in RS5+
+        Write-Output "Saving $TempImagePath..." | Receive-Output -Color White
+        DisMount-WindowsImage -Path $ImageMountFolder -Save -CheckIntegrity
+        Write-Output ""
+        Write-Output ""
+        Start-Sleep 2
 
-    # Re-mount the image
-    Write-Output "Mounting $TempImagePath in $ImageMountFolder..." | Receive-Output -Color White
-    Mount-WindowsImage -ImagePath $TempImagePath -Index 1 -Path $ImageMountFolder -CheckIntegrity
-    Write-Output ""
-    Write-Output ""
+        # Re-mount the image
+        Write-Output "Mounting $TempImagePath in $ImageMountFolder..." | Receive-Output -Color White
+        Mount-WindowsImage -ImagePath $TempImagePath -Index 1 -Path $ImageMountFolder -CheckIntegrity
+        Write-Output ""
+        Write-Output ""
+    }
 }
 
 
@@ -1402,6 +1547,7 @@ Function Update-Win10WIM
         [bool]$ServicingStack,
         [bool]$CumulativeUpdate,
         [bool]$DotNet35,
+        [bool]$CumulativeDotNetUpdate,
         [bool]$AdobeFlashUpdate,
         [bool]$UpdateBootWIM,
         [string]$ImageMountFolder,
@@ -1412,47 +1558,6 @@ Function Update-Win10WIM
         [bool]$MakeUSBMedia,
         [bool]$MakeISOMedia
     )
-    
-
-    $SourceName = Switch ($SourceName)
-    {
-        Pro {"Windows 10 Pro"}
-        Enterprise {"Windows 10 Enterprise"}
-    }
-
-    If (Test-Path "$ImageMountFolder")
-    {
-        Write-Output "Deleting $ImageMountFolder\..." | Receive-Output -Color Gray
-        Get-ChildItem -Path "$ImageMountFolder" -Recurse | Remove-Item -Force -Recurse
-        Remove-Item -Path "$ImageMountFolder" -Force
-    }
-    If (!(Test-Path -path $ImageMountFolder))
-    {
-        New-Item -path $ImageMountFolder -ItemType Directory | Out-Null
-    }
-
-    If (Test-Path "$BootImageMountFolder")
-    {
-        Write-Output "Deleting $BootImageMountFolder\..." | Receive-Output -Color Gray
-        Get-ChildItem -Path "$BootImageMountFolder" -Recurse | Remove-Item -Force -Recurse
-        Remove-Item -Path "$BootImageMountFolder" -Force
-    }
-    If (!(Test-Path -path $BootImageMountFolder))
-    {
-        New-Item -path $BootImageMountFolder -ItemType Directory | Out-Null
-    }
-
-    If (Test-Path "$WinREImageMountFolder")
-    {
-        Write-Output "Deleting $WinREImageMountFolder\..." | Receive-Output -Color Gray
-        Get-ChildItem -Path "$WinREImageMountFolder" -Recurse | Remove-Item -Force -Recurse
-        Remove-Item -Path "$WinREImageMountFolder" -Force
-    }
-    If (!(Test-Path -path $WinREImageMountFolder))
-    {
-        New-Item -path $WinREImageMountFolder -ItemType Directory | Out-Null
-    }
-
 
     # Variables
     $Now = Get-Date -Format yyyy-MM-dd_HH-mm-ss
@@ -1461,20 +1566,27 @@ Function Update-Win10WIM
     $TmpBootImage = "$TempFolder\tmp_boot.wim"
     $ServicingStackPath = "$TempFolder\Servicing"
     $CumulativeUpdatePath = "$TempFolder\Cumulative"
-    $DotNetPath = "$TempFolder\DotNet"
+    $CumulativeDotNetPath = "$TempFolder\DotNet"
     $AdobeFlashUpdatePath = "$TempFolder\Adobe"
+    $Office365Path = "$TempFolder\Office365"
     $DeviceDriverPath = "$TempFolder\$Device"
     $VC2013x86Path = "$TempFolder\VCRuntimes\2013\vcredist_x86.exe"
     $VC2013x64Path = "$TempFolder\VCRuntimes\2013\vcredist_x64.exe"
-    $VC2015x86Path = "$TempFolder\VCRuntimes\2015\vc_redist.x86.exe"
-    $VC2015x64Path = "$TempFolder\VCRuntimes\2015\vc_redist.x64.exe"
-    $VC2017x86Path = "$TempFolder\VCRuntimes\2017\vc_redist.x86.exe"
-    $VC2017x64Path = "$TempFolder\VCRuntimes\2017\vc_redist.x64.exe"
+    $VC2019x86Path = "$TempFolder\VCRuntimes\2019\vc_redist.x86.exe"
+    $VC2019x64Path = "$TempFolder\VCRuntimes\2019\vc_redist.x64.exe"
     $ProUnattendXMLPath = "$WorkingDirPath\Win10Pro_Unattend.xml"
     $EntUnattendXMLPath = "$WorkingDirPath\Win10Ent_Unattend.xml"
-
-
-
+    $OfficeAuditXMLPath = "$WorkingDirPath\Win10_Audit_Office.xml"
+    $NoOfficeAuditXMLPath = "$WorkingDirPath\Win10_Audit_NoOffice.xml"
+    $InstallOfficeScriptPath = "$WorkingDirPath\InstallOffice.ps1"
+    $SysprepToOOBEScriptPath = "$WorkingDirPath\SysprepToOOBE.ps1"
+    
+    $SourceName = Switch ($SourceName)
+    {
+        Pro {"Windows 10 Pro"}
+        Enterprise {"Windows 10 Enterprise"}
+    }
+    
     Write-Output ""
     Write-Output ""
     Write-Output ""
@@ -1545,7 +1657,7 @@ Function Update-Win10WIM
             {
                 # Add required Servicing Stack updates
                 Write-Output "Adding Servicing Stack updates to $ImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpImage -DismountImageOnCompletion $True
             }
         }
 
@@ -1560,29 +1672,29 @@ Function Update-Win10WIM
             {
                 # Add monthly Cumulative update
                 Write-Output "Adding Cumulative updates to $ImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpImage -DismountImageOnCompletion $False
             }
         }
 
-        If ($DotNet35)
+        If ($CumulativeDotNetUpdate)
         {
-            $DNU = Get-ChildItem -Path $DotNetPath
-            If (!($DNU.Exists))
+            $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
+            If (!($CUDN.Exists))
             {
-                $DotNet35 = $False
+                $CumulativeDotNetUpdate = $False
             }
             Else
             {
-                # Add .NET Framework updates
-                Write-Output "Adding .NET Framework updates to $ImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $DotNetPath -TempImagePath $TmpImage
+                # Add monthly Cumulative update
+                Write-Output "Adding Cumulative .NET updates to $ImageMountFolder..." | Receive-Output -Color White
+                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpImage -DismountImageOnCompletion $False
             }
         }
         
-        if ($AdobeFlashUpdate)
+        If ($AdobeFlashUpdate)
         {
             $AFU = Get-ChildItem -Path $AdobeFlashUpdatePath
-            if (!($AFU.Exists))
+            If (!($AFU.Exists))
             {
                 $AdobeFlashUpdate = $False
             }
@@ -1590,17 +1702,39 @@ Function Update-Win10WIM
             {
                 # Add Adobe Flash updates
                 Write-Output "Adding Adobe Flash updates to $ImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $AdobeFlashUpdatePath -TempImagePath $TmpImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $AdobeFlashUpdatePath -TempImagePath $TmpImage -DismountImageOnCompletion $False
+            }
+        }
+
+        If ($Office365 -eq $True)
+        {
+            # Copy Office 365 bits to device
+            If (Test-Path "$ImageMountFolder\Windows\Temp\Office365")
+            {
+                Write-Output "$ImageMountFolder\Windows\Temp\Office365..." | Receive-Output -Color Gray
+                Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\Office365" -Recurse | Remove-Item -Force -Recurse
+                Remove-Item -Path "$ImageMountFolder\Windows\Temp\Office365" -Force
+            }
+            If (!(Test-Path "$ImageMountFolder\Windows\Temp\Office365"))
+            {
+                New-Item -Path "$ImageMountFolder\Windows\Temp\Office365" -ItemType Directory | Out-Null
+            }
+
+            If (!($Architecture -eq "ARM64"))
+            {
+                Write-Output "Copying Office365 files to $ImageMountFolder\Windows\Temp..."
+                Copy-Item -Path $InstallOfficeScriptPath -Destination "$Office365Path\InstallOffice.ps1" -Force -ErrorAction Continue
+                & xcopy.exe /herky "$Office365Path" "$ImageMountFolder\Windows\Temp\Office365"
+                Write-Output ""
             }
         }
 
         If ($Device)
         {
-            $MSITempPath = "$DeviceDriverPath\Extract"
-            $MSIFiles = Get-ChildItem -Path $MSITempPath -Recurse
+            $MSIFiles = Get-ChildItem -Path $DeviceDriverPath -Recurse
             # Add drivers/firmware to WIM
-            Write-Output "Adding Driver updates for $Device to $ImageMountFolder from $MSITempPath..." | Receive-Output -Color White
-            Add-WindowsDriver -Path $ImageMountFolder -Driver "$MSITempPath" -Recurse
+            Write-Output "Adding Driver updates for $Device to $ImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
+            Add-WindowsDriver -Path $ImageMountFolder -Driver "$DeviceDriverPath" -Recurse
             Write-Output ""
             Write-Output ""
 
@@ -1616,49 +1750,46 @@ Function Update-Win10WIM
                 New-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2013" -ItemType Directory | Out-Null
             }
 
-            If (Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2015")
+            If (Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019")
             {
-                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2015..." | Receive-Output -Color Gray
-                Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2015" -Recurse | Remove-Item -Force -Recurse
-                Remove-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2015" -Force
+                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2019..." | Receive-Output -Color Gray
+                Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019" -Recurse | Remove-Item -Force -Recurse
+                Remove-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019" -Force
             }
-            If (!(Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2015"))
+            If (!(Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019"))
             {
-                New-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2015" -ItemType Directory | Out-Null
-            }
-
-            If (Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2017")
-            {
-                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2017..." | Receive-Output -Color Gray
-                Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2017" -Recurse | Remove-Item -Force -Recurse
-                Remove-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2017" -Force
-            }
-            If (!(Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2017"))
-            {
-                New-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2017" -ItemType Directory | Out-Null
-            }
-
-            If (!($Architecture -eq "ARM64"))
-            {
-                Write-Output "Copying VC++ Runtime binaries to $ImageMountFolder\Windows\Temp..."
-                Copy-Item -Path $VC2013x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
-                Copy-Item -Path $VC2013x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
-                Copy-Item -Path $VC2015x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2015"
-                Copy-Item -Path $VC2015x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2015"
-                Copy-Item -Path $VC2017x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2017"
-                Copy-Item -Path $VC2017x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2017"
-                Write-Output ""
+                New-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019" -ItemType Directory | Out-Null
             }
         }
 
-        Write-Output "Copying unattend.xml to $ImageMountFolder\Windows\System32\sysprep..."
+        If (!($Architecture -eq "ARM64"))
+        {
+            Write-Output "Copying VC++ Runtime binaries to $ImageMountFolder\Windows\Temp..."
+            Copy-Item -Path $VC2013x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
+            Copy-Item -Path $VC2013x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
+            Copy-Item -Path $VC2019x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2019"
+            Copy-Item -Path $VC2019x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2019"
+            Write-Output ""
+        }
+
+        Write-Output "Copying files to disk for unattended installation..."
+        Copy-Item -Path $SysprepToOOBEScriptPath -Destination "$ImageMountFolder\Windows\Temp\SysprepToOOBE.ps1" -Force -ErrorAction Continue
+        If ($Office365)
+        {
+            Copy-Item -Path $OfficeAuditXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml" -Force -ErrorAction Continue
+        }
+        Else
+        {
+            Copy-Item -Path $NoOfficeAuditXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml" -Force -ErrorAction Continue
+        }
+
         If ($OSSKU -like "*Pro*")
         {
-            Copy-Item -Path $ProUnattendXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml"
+            Copy-Item -Path $ProUnattendXMLPath -Destination "$ImageMountFolder\Windows\Temp\Reseal.xml" -Force -ErrorAction Continue
         }
         If ($OSSKU -like "*Enterprise*")
         {
-            Copy-Item -Path $EntUnattendXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml"
+            Copy-Item -Path $EntUnattendXMLPath -Destination "$ImageMountFolder\Windows\Temp\Reseal.xml" -Force -ErrorAction Continue
         }
         Write-Output ""
 
@@ -1698,7 +1829,7 @@ Function Update-Win10WIM
             {
                 # Add Servicing Stack updates to the WinRE image 
                 Write-Output "Adding Servicing Stack updates to $WinREImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpWinREImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $True
             }
         }
 
@@ -1713,33 +1844,32 @@ Function Update-Win10WIM
             {
                 # Add monthly Cumulative updates to the WinRE image
                 Write-Output "Adding Cumulative updates to $WinREImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpWinREImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $False
             }
         }
-        
-        If ($DotNet35)
+
+        If ($CumulativeDotNetUpdate)
         {
-            $DNU = Get-ChildItem -Path $DotNetPath
-            If (!($DNU.Exists))
+            $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
+            If (!($CUDN.Exists))
             {
-                $DotNet35 = $False
+                $CumulativeDotNetUpdate = $False
             }
             Else
             {
-                # Add .NET Framework updates
-                Write-Output "Adding .NET Framework updates to $WinREImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $DotNetPath -TempImagePath $TmpWinREImage
+                # Add monthly Cumulative update
+                Write-Output "Adding Cumulative .NET updates to $WinREImageMountFolder..." | Receive-Output -Color White
+                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $False
             }
         }
 
         If ($Device)
         {
-            $MSITempPath = "$DeviceDriverPath\Extract"
-            $MSIFiles = Get-ChildItem -Path $MSITempPath -Recurse
+            $MSIFiles = Get-ChildItem -Path $DeviceDriverPath -Recurse
             If ($SurfaceDevices.$Device)
             {
                 # Add system-level drivers to WIM
-                Write-Output "Adding Driver updates for $Device to $WinREImageMountFolder from $MSITempPath..." | Receive-Output -Color White
+                Write-Output "Adding Driver updates for $Device to $WinREImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
                 $Drivers = $SurfaceDevices.$Device.Drivers.Driver
                 ForEach ($Driver in $Drivers)
                 {
@@ -1803,6 +1933,10 @@ Function Update-Win10WIM
 
         # Validate Windows WIM build number
         $Build = (Get-Item $ImageMountFolder\Windows\System32\ntoskrnl.exe).VersionInfo.ProductVersion
+        If (($global:ReleaseId -eq "1909") -and ($Build -match "18362"))
+        {
+            $Build = $Build -replace "18362", "18363"
+        }
         If ($Device)
         {
             $RefImage = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-Install-$Build-$OSSKU-$Now.wim"
@@ -1902,7 +2036,7 @@ Function Update-Win10WIM
             {
                 # Add required Servicing Stack updates
                 Write-Output "Adding Servicing Stack updates to $BootImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpBootImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpBootImage -DismountImageOnCompletion $True
             }
         }
 
@@ -1917,33 +2051,32 @@ Function Update-Win10WIM
             {
                 # Add monthly Cumulative update
                 Write-Output "Adding Cumulative updates to $BootImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpBootImage
+                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpBootImage -DismountImageOnCompletion $False
             }
         }
 
-        If ($DotNet35)
+        If ($CumulativeDotNetUpdate)
         {
-            $DNU = Get-ChildItem -Path $DotNetPath
-            If (!($DNU.Exists))
+            $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
+            If (!($CUDN.Exists))
             {
-                $DotNet35 = $False
+                $CumulativeDotNetUpdate = $False
             }
             Else
             {
-                # Add .NET Framework updates
-                Write-Output "Adding .NET Framework updates to $BootImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $DotNetPath -TempImagePath $TmpBootImage
+                # Add monthly Cumulative update
+                Write-Output "Adding Cumulative .NET updates to $BootImageMountFolder..." | Receive-Output -Color White
+                Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpBootImage -DismountImageOnCompletion $False
             }
         }
 
         If ($Device)
         {
-            $MSITempPath = "$DeviceDriverPath\Extract"
-            $MSIFiles = Get-ChildItem -Path $MSITempPath -Recurse
+            $MSIFiles = Get-ChildItem -Path $DeviceDriverPath -Recurse
             If ($SurfaceDevices.$Device)
             {
                 # Add system-level drivers to WIM
-                Write-Output "Adding Driver updates for $Device to $BootImageMountFolder from $MSITempPath..." | Receive-Output -Color White
+                Write-Output "Adding Driver updates for $Device to $BootImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
                 $Drivers = $SurfaceDevices.$Device.Drivers.Driver
                 ForEach ($Driver in $Drivers)
                 {
@@ -2043,6 +2176,10 @@ Function Update-Win10WIM
 
         # Variable
         $Build = (Get-Item $BootImageMountFolder\Windows\System32\ntoskrnl.exe).VersionInfo.ProductVersion
+        If (($global:ReleaseId = "1909") -and ($Build -match "18362"))
+        {
+            $Build = $Build -replace "18362", "18363"
+        }
         If ($Device)
         {
             $RefBootImage = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-Boot-$Build-$Now.wim"
@@ -2192,7 +2329,7 @@ Function Update-Win10WIM
             $efisys = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles\efisys.bin"
             $etfsboot = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles\etfsboot.com"
             $MediaSource = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media"
-            $args = "-l$Device -bootdata:2#p0,e,b$etfsboot#pEF,e,b$efisys -m -u1 -udfver102 $MediaSource $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-Boot-$Build-$Now.iso"
+            $args = "-l$Device -bootdata:2#p0,e,b$etfsboot#pEF,e,b$efisys -m -u1 -udfver102 $MediaSource $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso"
             
             If ($SplitWIM -eq $True)
             {
@@ -2226,13 +2363,15 @@ Function Update-Win10WIM
     Write-Output ""
     Start-Sleep 2
 
+    Set-Location -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture"
     Write-Output "Finalized image files can be found here:" | Receive-Output -Color White
     Write-Output ""
     If ($CreateISO)
     {
-        If (Test-Path("$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-Boot-$Build-$Now.iso"))
+        If (Test-Path("$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso"))
         {
-            Write-Output "ISO:      $$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-Boot-$Build-$Now.iso" | Receive-Output -Color Green
+            Write-Output "ISO:      $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso" | Receive-Output -Color Green
+            Write-Output ""
         }
     }
     If ($SplitWIM -eq $True)
@@ -2244,6 +2383,7 @@ Function Update-Win10WIM
         Write-Output "Install:  $RefImage" | Receive-Output -Color Green
     }
     Write-Output "Boot:     $RefBootImage" | Receive-Output -Color Green
+    Write-Output ""
 }
 
 
@@ -2251,7 +2391,7 @@ Function Update-Win10WIM
 ###########################
 # Begin script processing #
 ###########################
-cls
+Clear-Host
 
 
 # Get current working directory
@@ -2268,7 +2408,6 @@ If ($Device)
     # Read WinPEXML file
     [string]$XmlPath = "$WorkingDirPath\WinPE_Drivers.xml"
     [Xml]$WinPEXML = Get-Content $XmlPath
-    [System.Xml.XmlElement] $root = $WinPEXML.get_DocumentElement()
     
     $SurfaceDevices = $WinPEXML.Surface.Devices
 }
@@ -2303,14 +2442,18 @@ Write-Output " *********************************************" | Receive-Output -
 Write-Output ""
 Write-Output "ISO path:                     $ISO" | Receive-Output -Color White
 Write-Output "OS SKU:                       $OSSKU" | Receive-Output -Color White
-Write-Output "Output:                       $DestinationFolder" | Receive-Output -Color White
 Write-Output "Architecture:                 $Architecture" | Receive-Output -Color White
+Write-Output "Output:                       $DestinationFolder" | Receive-Output -Color White
 Write-Output "  .NET 3.5:                   $DotNet35" | Receive-Output -Color White
 Write-Output "  Servicing Stack:            $ServicingStack" | Receive-Output -Color White
 Write-Output "  Cumulative Update:          $CumulativeUpdate" | Receive-Output -Color White
-Write-Output "  Cumulative DotNet Updates:  $CumulativeUpdate" | Receive-Output -Color White
+Write-Output "  Cumulative DotNet Updates:  $CumulativeDotNetUpdate" | Receive-Output -Color White
 Write-Output "  Adobe Flash Player Updates: $AdobeFlashUpdate" | Receive-Output -Color White
-Write-Output "  Device drivers:             $Device" | Receive-Output -Color White
+Write-Output "  Office 365 install:         $Office365" | Receive-Output -Color White
+If ($Device)
+{
+    Write-Output "  Device drivers:             $Device" | Receive-Output -Color White
+}
 If ($UseLocalDriverPath -eq $True)
 {
     Write-Output "  Use Local driver path:      $LocalDriverPath" | Receive-Output -Color White
@@ -2325,12 +2468,8 @@ Start-Sleep 2
 # Pull Windows 10 version and SKU from ISO provided by script param, returns OSVersion and WinPEVersion variable as well
 Get-OSWIMFromISO -ISO $ISO -OSSKU $OSSKU -DestinationFolder $DestinationFolder -Architecture $Architecture -WindowsKitsInstall $WindowsKitsInstall -ScratchMountFolder $ScratchMountFolder
 Start-Sleep 2
-Write-Output "OSVersion:  " $global:OSVersion | Receive-Output -Color White
-Write-Output "ReleaseId:  " $global:ReleaseId | Receive-Output -Color White
-Write-Output ""
-Write-Output ""
-Write-Output ""
-Write-Output ""
+Write-Output "OSVersion:  $global:OSVersion" | Receive-Output -Color White
+Write-Output "ReleaseId:  $global:ReleaseId" | Receive-Output -Color White
 Write-Output ""
 Start-Sleep 5
 
@@ -2341,20 +2480,46 @@ $TempFolder = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp"
 $ImageMountFolder = "$Mount\OSImage"
 $BootImageMountFolder = "$Mount\BootImage"
 $WinREImageMountFolder = "$Mount\WinREImage"
+
+
+If (Test-Path "$ImageMountFolder")
+{
+    Write-Output "Deleting $ImageMountFolder\..." | Receive-Output -Color Gray
+    Get-ChildItem -Path "$ImageMountFolder" -Recurse | Remove-Item -Force -Recurse
+    Remove-Item -Path "$ImageMountFolder" -Force
+}
+If (!(Test-Path -path $ImageMountFolder))
+{
+    New-Item -path $ImageMountFolder -ItemType Directory | Out-Null
+}
+
+If (Test-Path "$BootImageMountFolder")
+{
+    Write-Output "Deleting $BootImageMountFolder\..." | Receive-Output -Color Gray
+    Get-ChildItem -Path "$BootImageMountFolder" -Recurse | Remove-Item -Force -Recurse
+    Remove-Item -Path "$BootImageMountFolder" -Force
+}
+If (!(Test-Path -path $BootImageMountFolder))
+{
+    New-Item -path $BootImageMountFolder -ItemType Directory | Out-Null
+}
+
+If (Test-Path "$WinREImageMountFolder")
+{
+    Write-Output "Deleting $WinREImageMountFolder\..." | Receive-Output -Color Gray
+    Get-ChildItem -Path "$WinREImageMountFolder" -Recurse | Remove-Item -Force -Recurse
+    Remove-Item -Path "$WinREImageMountFolder" -Force
+}
+If (!(Test-Path -path $WinREImageMountFolder))
+{
+    New-Item -path $WinREImageMountFolder -ItemType Directory | Out-Null
+}
+
+
 If ($BootWIM)
 {
     $UpdateBootWIM = $True
 }
-
-
-# Download any components requested
-If ($Device)
-{
-    Get-LatestDrivers -TempFolder $TempFolder -Device $Device
-}
-
-# We always need the VC Runtimes for our devices
-Get-LatestVCRuntimes -TempFolder $TempFolder
 
 # If installing DotNet 3.5, the latest updates are also required - override any user parameters
 If ($DotNet35 -eq $True)
@@ -2369,6 +2534,22 @@ If ($CumulativeUpdate -eq $True)
 {
     $ServicingStack = $True
 }
+
+
+
+# Download any components requested
+If ($Device)
+{
+    Get-LatestDrivers -TempFolder $TempFolder -Device $Device
+}
+
+If ($Office365 -eq $True)
+{
+    Get-Office365 -TempFolder $TempFolder
+}
+
+# We always need the VC Runtimes for our devices
+Get-LatestVCRuntimes -TempFolder $TempFolder
 
 If ($ServicingStack -eq $True)
 {
@@ -2392,7 +2573,7 @@ If ($AdobeFlashUpdate -eq $True)
 
 
 # Add Servicing Stack / Cumulative updates and necessary drivers to install.wim, winre.wim, and boot.wim
-Update-Win10WIM -SourcePath $SourcePath -SourceName $OSSKU -ServicingStack $ServicingStack -CumulativeUpdate $CumulativeUpdate -DotNet35 $DotNet35 -AdobeFlashUpdate $AdobeFlashUpdate -ImageMountFolder $ImageMountFolder -BootImageMountFolder $BootImageMountFolder -WinREImageMountFolder $WinREImageMountFolder -TempFolder $TempFolder -WindowsKitsInstall $WindowsKitsInstall -UpdateBootWIM $UpdateBootWIM -MakeUSBMedia $CreateUSB -MakeISOMedia $CreateISO
+Update-Win10WIM -SourcePath $SourcePath -SourceName $OSSKU -ServicingStack $ServicingStack -CumulativeUpdate $CumulativeUpdate -DotNet35 $DotNet35 -CumulativeDotNetUpdate $CumulativeDotNetUpdate -AdobeFlashUpdate $AdobeFlashUpdate -ImageMountFolder $ImageMountFolder -BootImageMountFolder $BootImageMountFolder -WinREImageMountFolder $WinREImageMountFolder -TempFolder $TempFolder -WindowsKitsInstall $WindowsKitsInstall -UpdateBootWIM $UpdateBootWIM -MakeUSBMedia $CreateUSB -MakeISOMedia $CreateISO
 
 
 # Determine ending time

@@ -18,6 +18,10 @@
     Last Update:  6th May 2020
     Version:      1.1.0
 
+    Version 1.2.0
+    - Added support for running from NVME USB-attached drives
+    - Bugfixes
+
     Version 1.1.0
     - Added support for running in a VM
     - Added support for running from an ISO or other read-only media
@@ -283,7 +287,7 @@ Write-Output "  OS IMAGE INSTALL  "
 Write-Output "********************"
 
 $UEFIVer = ($(& wmic bios get SMBIOSBIOSVersion /format:table)[2])
-Write-Output "- UEFI Information: $UEFIVer"
+Write-Output "- UEFI Information:   $UEFIVer"
 Write-Output ""
 Write-Output "- WinPE Information"
 $RegPath = "Registry::HKEY_LOCAL_MACHINE\Software"
@@ -356,9 +360,9 @@ If ($SourceDrive)
     }
 }
 
-Write-Output "Finding all attached drives with recognized filesystems..."
+Write-Output "Finding all removable drives with recognized filesystems..."
 Write-Output ""
-$Drives = Get-PSDrive | Where-Object { $_.Provider -like "*FileSystem*" }
+$Drives = Get-CimInstance -ClassName Win32_LogicalDisk
 If (!($Drives))
 {
     Write-Output "No drives found, exiting."
@@ -376,10 +380,27 @@ Else
 
 ForEach ($Drive in $Drives)
 {
-    $TempDrive = $Drive.Root
-    Write-Output "Checking drive $TempDrive for WIM/SWM files..."
-    $WIMFile = Get-ChildItem -Path $TempDrive -Recurse | Where-Object { $_.Name -like "*install*.wim" }
-    $SWMFile = Get-ChildItem -Path $TempDrive -Recurse | Where-Object { $_.Name -like "*install*--Split.swm" }
+    $TempDrive = $Drive.DeviceID
+    $TempPath = "$TempDrive\Sources"
+    If (($Drive.Description -like "*Disc*") -and (!($Drive.FileSystem)))
+    {
+        # Drive does not have an ISO/disc inserted, skip
+    }
+    Else
+    {
+        If (!(Test-Path "$TempPath"))
+        {
+            # No \Sources folder found, thus no WIM/SWMs should be on this volume, skipping
+        }
+        Else
+        {
+            Write-Output "Checking drive $TempDrive for WIM/SWM files..."
+            $WIMFile = Get-ChildItem -Path $TempPath -Recurse | Where-Object { $_.Name -like "*install*.wim" }
+            $SWMFile = Get-ChildItem -Path $TempPath -Recurse | Where-Object { $_.Name -like "*install*--Split.swm" }
+        }
+        
+    }
+
     If ($WIMFile)
     {
         $WIMFound = $true
@@ -398,18 +419,11 @@ ForEach ($Drive in $Drives)
         $SWMFilePattern = $SWMFile.DirectoryName + "\" + $SWMFile.BaseName + '*.swm'
         Break
     }
-    Else
-    {
-        Write-Output "Could not find any WIM files in $TempDrive, continuing..."
-        Write-Output ""
-    }
 }
 
 If ($WIMFound -eq $false)
 {
     Write-Output "WIM/SWM file(s) not found.  Exiting..."
-    Write-Output ""
-    Write-Output "WIMFound:  $WIMFound"
     Write-Output ""
     Exit
 }
@@ -424,21 +438,23 @@ Get-Content -Path $DiskPartScriptSourcePath | Add-Content -Path $DiskPartScriptP
 & $diskpart /s $DiskPartScriptPath
 
 
+<#
+# This isn't necessary on Modern Standby devices like Surface, but keeping in for custom device/custom deployment work
 # Enable Bitlocker
-If ("$($SystemInformation.Family)" -like "*Virtual*")
+If ("$($SystemInformation.SystemFamily)" -like "*Virtual*")
 {
-    # VM, don't try to clear TPM
+    # VM, don't try to enable Bitlocker
 }
 Else
 {
-    ClearTpm
-    Start-Sleep 2
-    Write-Output "Enabling XTS-AES 256Bit Bitlocker encryption"
+    #ClearTPM
+    Write-Output "Enabling Bitlocker encryption"
     EnableBitlocker
     & $managebde -on W: -UsedSpaceOnly
     Write-Output ""
     Write-Output ""
 }
+#>
 
 
 # Apply image

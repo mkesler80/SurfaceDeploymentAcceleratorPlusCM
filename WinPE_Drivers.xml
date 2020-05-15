@@ -432,5 +432,9 @@
             <Drivers>
             </Drivers>
         </SurfaceGo2>
+        <SurfaceHub2>
+            <Drivers>
+            </Drivers>
+        </SurfaceHub2>
     </Devices>
 </Surface>
