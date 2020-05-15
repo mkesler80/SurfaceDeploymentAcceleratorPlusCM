@@ -440,7 +440,7 @@ Get-Content -Path $DiskPartScriptSourcePath | Add-Content -Path $DiskPartScriptP
 
 <#
 # This isn't necessary on Modern Standby devices like Surface, but keeping in for custom device/custom deployment work
-# Enable Bitlocker
+Enable Bitlocker
 If ("$($SystemInformation.SystemFamily)" -like "*Virtual*")
 {
     # VM, don't try to enable Bitlocker
