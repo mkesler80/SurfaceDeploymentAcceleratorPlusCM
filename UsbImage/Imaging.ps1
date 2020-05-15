@@ -15,8 +15,8 @@
     
 .NOTES
     Author:       Microsoft
-    Last Update:  6th May 2020
-    Version:      1.1.0
+    Last Update:  14th May 2020
+    Version:      1.2.0
 
     Version 1.2.0
     - Added support for running from NVME USB-attached drives
