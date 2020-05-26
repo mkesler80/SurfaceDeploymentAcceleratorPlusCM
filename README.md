@@ -9,7 +9,7 @@ This tool is run via executiong "CreateSurfaceWindowsImage.ps1" as an administra
 
 Example:
 
-.\CreateSurfaceWindowsImage.ps1 -ISO "D:\18362.1.190318-1202.19h1_release_CLIENT_BUSINESS_VOL_x64FRE_en-us.iso" -DestinationFolder "D:\Temp" -Architecture x64 -Device SurfacePro7 -CreateUSB $True
+.\CreateSurfaceWindowsImage.ps1 -ISO "D:\18362.1.190318-1202.19h1_release_CLIENT_BUSINESS_VOL_x64FRE_en-us.iso" -DestinationFolder "D:\Temp" -Architecture x64 -Device SurfacePro7 -CreateUSB $True -CreateISO $False
 
 
 The parameters that are available to the script are as follows:
