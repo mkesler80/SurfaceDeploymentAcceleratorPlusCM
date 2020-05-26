@@ -22,10 +22,14 @@
 
 .NOTES
     Author:       Microsoft
-    Last Update:  14th May 2020
-    Version:      1.2.0
+    Last Update:  26th May 2020
+    Version:      1.2.1
+
+    Version 1.2.1
+    - Fixed sysprep audit bugs
 
     Version 1.2.0
+    - Added support for Surface Laptop 3 AMD SKUs (please note the "Device" name change from 1.0 and 1.1 versions for SurfaceLaptop3* variants)
     - Added support for including Office 365 into images
     - Bugfixes / performance improvements
 
@@ -53,9 +57,9 @@ Param(
     [Parameter(
         Position=2,
         Mandatory=$False,
-        HelpMessage="What SKU should be used inside ISO (valid parameters are 'Pro' or 'Enterprise'), default is Pro"
+        HelpMessage="What SKU should be used inside ISO (valid parameters are 'Pro' or 'Enterprise'), default is Pro - note checking is disabled currently as language support is added"
         )]
-        [ValidateSet('Pro', 'Enterprise')]
+        #[ValidateSet('Pro', 'Enterprise')]
         [string]$OSSKU = 'Pro',
 
     [Parameter(
@@ -120,7 +124,7 @@ Param(
         Mandatory=$False,
         HelpMessage="Surface device type to add drivers to image for, if not specified no drivers injected - Custom can be used if using with a non-Surface device"
         )]
-        [ValidateSet('SurfacePro4', 'SurfacePro5', 'SurfacePro6', 'SurfacePro7', 'SurfaceLaptop', 'SurfaceLaptop2', 'SurfaceLaptop3', 'SurfaceBook', 'SurfaceBook2', 'SurfaceBook3', 'SurfaceStudio', 'SurfaceStudio2', 'SurfaceGo', 'SurfaceGoLTE', 'SurfaceGo2', 'Custom')]
+        [ValidateSet('SurfacePro4', 'SurfacePro5', 'SurfacePro6', 'SurfacePro7', 'SurfaceLaptop', 'SurfaceLaptop2', 'SurfaceLaptop3Intel', 'SurfaceLaptop3AMD', 'SurfaceBook', 'SurfaceBook2', 'SurfaceBook3', 'SurfaceStudio', 'SurfaceStudio2', 'SurfaceGo', 'SurfaceGoLTE', 'SurfaceGo2', 'Custom')]
         [string]$Device = "SurfacePro7",
 
     [Parameter(
@@ -187,6 +191,9 @@ Param(
         [string]$LocalDriverPath
     )
 
+
+
+$OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 
 
 Function Receive-Output
@@ -981,8 +988,24 @@ Function Get-LatestDrivers
     {
         Write-Output "Downloading latest drivers for $Device, Windows 10 version $global:OSVersion..." | Receive-Output -Color White
         $OSBuild = New-Object string (,@($global:OSVersion.ToCharArray() | Select-Object -Last 5))
-        $URL = "https://aka.ms/" + $Device + "/" + $OSBuild
 
+        If ($Device -eq "SurfaceLaptop3Intel")
+        {
+            $TempDevice = "SurfaceLaptop3"
+            $TempDeviceType = "Intel"
+            $URL = "https://aka.ms/" + $TempDevice + "/" + $TempDeviceType + "/" + $OSBuild
+        }
+        ElseIf ($Device -eq "SurfaceLaptop3AMD")
+        {
+            $TempDevice = "SurfaceLaptop3"
+            $TempDeviceType = "AMD"
+            $URL = "https://aka.ms/" + $TempDevice + "/" + $TempDeviceType + "/" + $OSBuild
+        }
+        Else
+        {
+            $URL = "https://aka.ms/" + $Device + "/" + $OSBuild
+        }
+        
         $DownloadedFile = DownloadFile -URL $URL -Path "$DeviceDriverPath"
         Write-Output "Downloaded File: $DownloadedFile"
 
@@ -1022,16 +1045,6 @@ Function Get-LatestVCRuntimes
     {
         New-Item -path "$VisualCRuntimePath\2013" -ItemType "directory" | Out-Null
     }
-    <#
-    If (!(Test-Path "$VisualCRuntimePath\2015"))
-    {
-        New-Item -path "$VisualCRuntimePath\2015" -ItemType "directory" | Out-Null
-    }
-    If (!(Test-Path "$VisualCRuntimePath\2017"))
-    {
-        New-Item -path "$VisualCRuntimePath\2017" -ItemType "directory" | Out-Null
-    }
-    #>
     If (!(Test-Path "$VisualCRuntimePath\2019"))
     {
         New-Item -path "$VisualCRuntimePath\2019" -ItemType "directory" | Out-Null
@@ -1268,23 +1281,49 @@ Function Get-OSWIMFromISO
     $WIMs = Get-ChildItem -Path "$Drive" -Filter install.wim -Recurse
     $OSWIMFound = $False
 
-    # Required to get ReleaseId value, which is needed for 1909
     ForEach ($WIM in $WIMs)
     {
         $TempWIM = $WIM.FullName
-        $OSWIM = Get-WindowsImage -ImagePath $TempWIM | Where-Object {($_.ImageName -like "*$($OSSKU)") -or ($_.ImageName -like "*$($OSSKU) Evaluation") -or ($_.ImageName -like "*$OSSKU) LTSC")}
-        If (!($OSWIM))
+        #$OSWIM = Get-WindowsImage -ImagePath $TempWIM | Where-Object {($_.ImageName -like "*$($OSSKU)") -or ($_.ImageName -like "*$($OSSKU) Evaluation") -or ($_.ImageName -like "*$OSSKU) LTSC")}
+        
+        # Handle different language support as per issue #1 (https://github.com/microsoft/SurfaceDeploymentAccelerator/issues/1)
+        $OSImages = Get-WindowsImage -ImagePath $TempWIM
+
+        # Read WinPEXML file
+        [string]$XmlPath = "$WorkingDirPath\Languages.xml"
+        [Xml]$LanguagesXML = Get-Content $XmlPath
+        $Editions = $LanguagesXML.Windows10.Editions.$OSSKU.Variants.Variant
+
+        Write-Output "Checking $TempWIM for valid images..."
+        ForEach ($Edition in $Editions)
         {
-            # $OSSKU not found
+            ForEach ($OSImage in $OSImages)
+            {
+                If ($OSImage.ImageName -eq $Edition.name)
+                {
+                    $ImagePath = $OSImage.ImagePath
+                    $ImageIndex = $OSImage.ImageIndex
+                    $OSImage = Get-WindowsImage -ImagePath $ImagePath -Index $ImageIndex
+                    $ImageName = $OSImage.ImageName
+                    $ImageVersion = $OSImage.Version
+                    $ImageArch = $OSImage.Architecture
+                    $OSImageFound = $True
+                    Break
+                }
+                Else
+                {
+                    # Do nothing, keep looking
+                }
+            }
+        }
+
+        If (!($OSImage))
+        {
+            # $OSImage not found
+            $OSImageFound = $False
         }
         Else
         {
-            $ImageIndex = $OSWIM.ImageIndex
-            $ImagePath = $OSWIM.ImagePath
-            $OSWIM = Get-WindowsImage -ImagePath $ImagePath -Index $ImageIndex
-            $ImageName = $OSWIM.ImageName
-            $ImageVersion = $OSWIM.Version
-            $ImageArch = $OSWIM.Architecture
             If ($ImageArch -eq "0")
             {
                 $ImageArch = "x86"
@@ -1306,11 +1345,7 @@ Function Get-OSWIMFromISO
             Write-Output "Architecture:  $ImageArch" | Receive-Output -Color White
             Write-Output ""
 
-            If (($ImageName -like "*$($OSSKU)") -or ($ImageName -like "*$($OSSKU) Evaluation") -or ($ImageName -like "*$OSSKU) LTSC"))
-            {
-                $global:OSVersionFull = (Get-WindowsImage -ImagePath "$ImagePath" -Index "$ImageIndex").Version
-                $OSWIMFound = $True
-            }
+            $global:OSVersionFull = (Get-WindowsImage -ImagePath "$ImagePath" -Index "$ImageIndex").Version
             If ($global:OSVersionFull)
             {
                 $global:OSVersion = $global:OSVersionFull.Substring(0, $global:OSVersionFull.LastIndexOf('.'))
@@ -1337,7 +1372,7 @@ Function Get-OSWIMFromISO
         }
     }
 
-    If ($OSWIMFound -eq $False)
+    If ($OSImageFound -eq $False)
     {
         Dismount-DiskImage -ImagePath $ISO | Out-Null
         Write-Output "$OSSKU not found in $WIMs on $ISO.  Please make sure to use an ISO file that contains $OSSKU, and try again." | Receive-Output -Color Red
@@ -1462,10 +1497,10 @@ Function Get-OSWIMFromISO
 
     Write-Output "Copying $WindowsKitsInstall\Windows Preinstallation Environment\$Arch\en-us\winpe.wim to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim..." | Receive-Output -Color White
     Copy-Item -Path "$WindowsKitsInstall\Windows Preinstallation Environment\$Arch\en-us\winpe.wim" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim"
-    $BootWIMs = Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs" -filter boot.wim -Recurse
-    ForEach ($BootWIM in $BootWIMs)
+    $SourceBootWIMs = Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs" -filter boot.wim -Recurse
+    ForEach ($SourceBootWIM in $SourceBootWIMs)
     {
-        $TempBootWIM = $BootWIM.FullName
+        $TempBootWIM = $SourceBootWIM.FullName
 
         $PEWIM = Get-WindowsImage -ImagePath $TempBootWIM | Where-Object {$_.ImageName -like "*Windows PE*"}
 
@@ -2519,6 +2554,10 @@ If (!(Test-Path -path $WinREImageMountFolder))
 If ($BootWIM)
 {
     $UpdateBootWIM = $True
+}
+Else
+{
+    $UpdateBootWIM = $False
 }
 
 # If installing DotNet 3.5, the latest updates are also required - override any user parameters

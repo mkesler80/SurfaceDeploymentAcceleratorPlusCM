@@ -15,8 +15,12 @@
     
 .NOTES
     Author:       Microsoft
-    Last Update:  14th May 2020
-    Version:      1.2.0
+    Last Update:  26th May 2020
+    Version:      1.2.1
+
+    Version 1.2.1
+    - Performance improvements
+    - Removed forced Bitlocker encryption - causes issues on non-Surface devices
 
     Version 1.2.0
     - Added support for running from NVME USB-attached drives
@@ -350,7 +354,6 @@ $SourceDrive = Get-ChildItem -Path "$DriveLetter" -Recurse | Where-Object { $_.N
 
 If ($SourceDrive)
 {
-    $Folder = Get-ChildItem -Path "$DriveLetter" -Recurse | Where-Object { $_.PSIsContainer -and $_.Name -like "Sources*" }
     $DiskPartScript = Get-ChildItem -Path "X:\" -Recurse | Where-Object { $_.Name -eq "CreatePartitions-UEFI.txt" }
     $DiskPartScriptSource = Get-ChildItem -Path "X:\" -Recurse | Where-Object { $_.Name -eq "CreatePartitions-UEFI_Source.txt" }
     If ($DiskPartScript)
@@ -360,7 +363,7 @@ If ($SourceDrive)
     }
 }
 
-Write-Output "Finding all removable drives with recognized filesystems..."
+Write-Output "Finding all attached drives with recognized filesystems..."
 Write-Output ""
 $Drives = Get-CimInstance -ClassName Win32_LogicalDisk
 If (!($Drives))
