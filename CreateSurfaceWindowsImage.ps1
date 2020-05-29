@@ -22,8 +22,11 @@
 
 .NOTES
     Author:       Microsoft
-    Last Update:  26th May 2020
-    Version:      1.2.1
+    Last Update:  29th May 2020
+    Version:      1.2.2
+
+    Version 1.2.2
+    - Added USB drive picker
 
     Version 1.2.1
     - Fixed sysprep audit bugs
@@ -1574,6 +1577,200 @@ Function Add-PackageIntoWindowsImage
 
 
 
+Function UpdateMenu
+{
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]
+        $MenuTitle,
+
+        [Parameter(Mandatory=$true)]
+        [string[]]
+        $MenuItems,
+
+        [Parameter(Mandatory=$false)]
+        [switch]
+        $ShowOnlyLastFolder,
+
+        [Parameter(Mandatory=$true)]
+        [int]
+        $selection
+    )
+
+    cls
+
+    $UpA = [char]0x2191
+    $DownA = [char]0x2193
+    $Count = $MenuItems.Length
+    $HelperText = " $UpA, $DownA, Num (1-$Count), Enter to select:"
+
+    Write-Host -ForegroundColor White "`n $MenuTitle "
+    Write-Host -ForegroundColor White ("-"*($MenuTitle.Length + 4))
+
+    $itemCount = 0
+    foreach($item in $MenuItems){
+
+        if($ShowOnlyLastFolder -eq $true){
+            $line = [string]$(Split-Path -Path $item -Leaf)
+        } else {
+            $line = $item
+        }
+
+        if($selection -eq $itemCount) {
+            $itemCount++
+            Write-Host -BackgroundColor White -ForegroundColor Black "$itemCount ] $line"
+        } else {
+            $itemCount++
+            Write-Host -ForegroundColor White "$itemCount ] $line"
+        }
+    }
+    
+    $viewSelection = $selection+1
+    Write-Host -ForegroundColor White ("-"*($MenuTitle.Length + 4))
+    if($HelperText){
+        Write-Host -ForegroundColor Yellow $HelperText
+    }
+    Write-Host -ForegroundColor White ">>: $viewSelection" -NoNewline
+}
+
+
+
+Function Select-MenuItem
+{
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]
+        $MenuTitle,
+
+        [Parameter(Mandatory=$true)]
+        [string[]]
+        $MenuItems,
+
+        [Parameter(Mandatory=$false)]
+        [switch]
+        $ShowOnlyLastFolder
+    )
+
+    cls
+    
+    #Menu input type defines
+    $ENTER = 13
+    $UPARROW = 38
+    $DOWNARROW = 40
+    $LEFTARROW = 37
+    $RIGHTARROW = 39
+    $BACKSPACE = 8
+    $DELETE = 46
+
+    #init selection variables
+    $selection = 0
+    $ExitEvent = $false
+    $UserInput = $null
+
+    Do {
+        #   clear key input before getting new up/down/enter etc
+        $host.UI.RawUI.FlushInputBuffer()
+
+        UpdateMenu -MenuTitle $MenuTitle -MenuItems $MenuItems -selection $selection -ShowOnlyLastFolder
+
+        $key = ($host.UI.RawUI.ReadKey("NoEcho,IncludeKeyUp")).VirtualKeyCode
+        #Below lines useful for debugging
+        #Write-Host -ForegroundColor Magenta $key
+        #[Threading.Thread]::Sleep( 800 )
+
+        switch ($key) {
+            $UPARROW {
+                if($selection -gt 0){
+                    $selection--
+                    $UserInput = $null
+                }
+            }
+
+            $DOWNARROW {
+                if($selection -lt ($MenuItems.Count - 1) ) {
+                    $selection++
+                    $UserInput = $null
+                }
+            }
+
+            {(48..57) -contains $_ } {
+                #Number 0-9 key hit
+                $num = $key - 48
+
+                #$MenuItems.Count
+                $tempUI = $UserInput
+                if( ($UserInput -eq $null) -or (($UserInput.Length -gt 0) -and ($MenuItems.Count -lt 10)) ) {
+                    $tempUI = [string]"$num"
+                } else {
+                    $tempUI = $UserInput + [string]"$num"
+                }
+                #Below lines useful for debugging
+                #Write-Host -ForegroundColor Magenta "tempUI: $tempUI"
+                #[Threading.Thread]::Sleep( 1000 )
+
+                $UINum = [int]$tempUI
+                if( ($UINum -le 0) -or ($UINum -gt $MenuItems.Count) ) {
+                    #out of range, reset
+                    $UserInput = [string]($selection + 1)
+                } else {
+                    $UserInput = $tempUI
+                    $selection = $UINum - 1
+                }
+
+            }
+
+            $ENTER {
+                $ExitEvent = $true
+            }
+
+            $BACKSPACE {
+                #Do back space stuff
+                if( $UserInput.Length -eq 1 ) {
+                    $UserInput = $null
+                    $selection = 0
+                }
+
+                if( $UserInput.Length -gt 1 ) {
+                    $UserInput = $UserInput.Substring(0, $UserInput.Length-1)
+                    $selection = ([int]$UserInput) - 1
+                }                
+            }
+        }
+
+    } While ( -not $ExitEvent )
+
+    Return $selection
+}
+
+
+
+Function Select-USBDrive
+{
+    $usbDisks = Get-Disk | Where-Object BusType -eq USB | Where-Object isOffline -ne True | Sort-Object Size
+    $DriveNumArray = @($usbDisks | Select-Object -ExpandProperty Number)
+    $MenuArray = @()
+    $usbDisks | 
+    Select-Object -Property Number, FriendlyName, Size | 
+        ForEach-Object {
+            $VolumeLabel = (Get-Disk -Number $_.Number | Get-Partition | Get-Volume).FileSystemLabel
+            $MenuArray += "DISK:$("{0:D3}" -f $_.Number) ($("{0:G5} GB" -f ($_.Size /1GB))) [$VolumeLabel] $($_.FriendlyName) "
+        }
+
+    If ($DriveNumArray.Count -lt 1)
+    {
+        Write-Host -ForegroundColor Red " -- No USB key Found."
+        Return $null
+    }
+    
+    $SelectIndex = Select-MenuItem -MenuTitle "Select USB Drive to format" -MenuItems $MenuArray
+    $diskNumToFlash = $DriveNumArray[$SelectIndex]
+    $diskName = $MenuArray[$SelectIndex]
+
+    Write-Output   $diskNumToFlash
+}
+
+
+
 Function Update-Win10WIM
 {
     Param(
@@ -1822,7 +2019,7 @@ Function Update-Win10WIM
         {
             Copy-Item -Path $ProUnattendXMLPath -Destination "$ImageMountFolder\Windows\Temp\Reseal.xml" -Force -ErrorAction Continue
         }
-        If ($OSSKU -like "*Enterprise*")
+        ElseIf ($OSSKU -like "*Enterprise*")
         {
             Copy-Item -Path $EntUnattendXMLPath -Destination "$ImageMountFolder\Windows\Temp\Reseal.xml" -Force -ErrorAction Continue
         }
@@ -1880,21 +2077,6 @@ Function Update-Win10WIM
                 # Add monthly Cumulative updates to the WinRE image
                 Write-Output "Adding Cumulative updates to $WinREImageMountFolder..." | Receive-Output -Color White
                 Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $False
-            }
-        }
-
-        If ($CumulativeDotNetUpdate)
-        {
-            $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
-            If (!($CUDN.Exists))
-            {
-                $CumulativeDotNetUpdate = $False
-            }
-            Else
-            {
-                # Add monthly Cumulative update
-                Write-Output "Adding Cumulative .NET updates to $WinREImageMountFolder..." | Receive-Output -Color White
-                Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $False
             }
         }
 
@@ -2305,7 +2487,9 @@ Function Update-Win10WIM
             PAUSE
             Start-Sleep 5
 
-            $TempUSB = (Get-PhysicalDisk | Where-Object {$_.BusType -eq "USB" -and $_.MediaType -ne "SSD"}).FriendlyName
+            # Find USB Drive that the image will be copied to.
+            $TempUSB = Select-USBDrive
+            Write-Output ""
 
             If (!($TempUSB))
             {
@@ -2313,47 +2497,61 @@ Function Update-Win10WIM
             }
             Else
             {
-                Write-Output "Getting USB drive ready..." | Receive-Output -Color White
-                $TempUSB = (Get-PhysicalDisk | Where-Object {$_.BusType -eq "USB" -and $_.MediaType -ne "SSD"}).FriendlyName
-                $USB = Get-Disk | Where-Object {$_.FriendlyName -like $TempUSB}
-                $USBSize = $USB.Size /1GB
-
-                Get-Disk -FriendlyName $TempUSB | Clear-Disk -RemoveData -Confirm:$false
-                Initialize-Disk -FriendlyName $TempUSB -PartitionStyle MBR -ErrorAction SilentlyContinue
-
-                If ($USBSize -ge "32")
+                $USB = Get-Disk | Where-Object {$_.Number -eq $TempUSB} | Get-Partition | Get-Volume
+                If ($USB)
                 {
-                    $NewUSBDriveLetter = New-Partition -DiskNumber $USB.DiskNumber -Size 32GB -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Device
+                    $USBVolumeLabel = @($USB.FileSystemLabel)
                 }
-                ElseIf ($USBSize -lt "14")
+                $USBDiskName = Get-Disk |
+                               Where-Object Number -eq $TempUSB |
+                               ForEach-Object { "DISK:$("{0:D3}" -f $_.Number) ($("{0:G5} GB" -f ($_.Size /1GB))) $($_.FriendlyName)"}
+                $UserInput = Read-Host -Prompt "`n`nAre you sure you want to format: [$USBVolumeLabel] on ($USBDiskName) (Y/N)?"
+
+                If ( $UserInput -ne "y" )
                 {
-                    Write-Warning "USB drive not 16GB or larger, skipping..."
+                    Write-Output " -- Aborting Operation" | Receive-Output -Color Yellow
                 }
                 Else
                 {
-                    $NewUSBDriveLetter = New-Partition -DiskNumber $USB.DiskNumber -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Device
-                }
+                    $USBSize = $USB.Size /1GB
 
-                $NewUSBDriveLetter = $NewUSBDriveLetter.DriveLetter + ":"
-
-                Write-Output "Copying WinPE Media contents to $NewUSBDriveLetter..." | Receive-Output -Color White
-                & bootsect.exe /nt60 $NewUSBDriveLetter /force /mbr
-                & xcopy /herky "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media" $NewUSBDriveLetter
-
-                If ($SplitWIM -eq $True)
-                {
-                    $SplitWIMs = Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture" -Filter *install*$Now*.swm -Recurse
-                    ForEach ($TempWIM in $SplitWIMs)
+                    Get-Disk -Number $TempUSB | Clear-Disk -RemoveData -Confirm:$false
+                    Initialize-Disk -Number $TempUSB -PartitionStyle MBR -ErrorAction SilentlyContinue
+    
+                    If ($USBSize -ge "32")
                     {
-                        $TempSplitWIM = $TempWIM.FullName
-                        Write-Output "Copying $TempSplitWIM to $NewUSBDriveLetter..." | Receive-Output -Color White
-                        Copy-Item -Path "$TempSplitWIM" -Destination "$NewUSBDriveLetter\Sources" -Force
+                        $NewUSBDriveLetter = New-Partition -DiskNumber $TempUSB -Size 32GB -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Device
                     }
-                }
-                Else
-                {
-                    Write-Output "Copying $RefImage to $NewUSBDriveLetter..." | Receive-Output -Color White
-                    Copy-Item -Path "$RefImage" -Destination "$NewUSBDriveLetter\Sources" -Recurse
+                    ElseIf ($USBSize -lt "14")
+                    {
+                        Write-Warning "USB drive not 16GB or larger, skipping..."
+                    }
+                    Else
+                    {
+                        $NewUSBDriveLetter = New-Partition -DiskNumber $TempUSB -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem FAT32 -NewFileSystemLabel $Device
+                    }
+
+                    $NewUSBDriveLetter = $NewUSBDriveLetter.DriveLetter + ":"
+
+                    Write-Output "Copying WinPE Media contents to $NewUSBDriveLetter..." | Receive-Output -Color White
+                    & bootsect.exe /nt60 $NewUSBDriveLetter /force /mbr
+                    & xcopy /herky "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media" $NewUSBDriveLetter
+    
+                    If ($SplitWIM -eq $True)
+                    {
+                        $SplitWIMs = Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture" -Filter *install*$Now*.swm -Recurse
+                        ForEach ($TempWIM in $SplitWIMs)
+                        {
+                            $TempSplitWIM = $TempWIM.FullName
+                            Write-Output "Copying $TempSplitWIM to $NewUSBDriveLetter..." | Receive-Output -Color White
+                            Copy-Item -Path "$TempSplitWIM" -Destination "$NewUSBDriveLetter\Sources" -Force
+                        }
+                    }
+                    Else
+                    {
+                        Write-Output "Copying $RefImage to $NewUSBDriveLetter..." | Receive-Output -Color White
+                        Copy-Item -Path "$RefImage" -Destination "$NewUSBDriveLetter\Sources" -Recurse
+                    }
                 }
             }
         }
