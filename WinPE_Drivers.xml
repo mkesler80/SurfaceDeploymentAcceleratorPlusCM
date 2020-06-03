@@ -360,7 +360,7 @@
             <Drivers>
                 <Driver name="commonsystem.inf"/>
                 <Driver name="heci.inf"/>
-                <Driver name="ialpss2_gpio2_icl.inf" />
+                <Driver name="ialpss2_gpio2_icl.inf"/>
                 <Driver name="ialpss2_i2c_icl.inf"/>
                 <Driver name="ialpss2_spi_icl.inf"/>
                 <Driver name="ialpss2_uart2_icl.inf"/>
@@ -432,9 +432,5 @@
             <Drivers>
             </Drivers>
         </SurfaceGo2>
-        <SurfaceHub2>
-            <Drivers>
-            </Drivers>
-        </SurfaceHub2>
     </Devices>
 </Surface>
