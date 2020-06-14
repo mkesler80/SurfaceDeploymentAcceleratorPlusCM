@@ -15,8 +15,14 @@
     
 .NOTES
     Author:       Microsoft
-    Last Update:  26th May 2020
-    Version:      1.2.1
+    Last Update:  10th June 2020
+    Version:      1.2.3
+
+    Version 1.2.3
+    - Changed all Get-WmiObject calls with Get-CimInstance calls to be more compatible with PowerShell Core
+    
+    Version 1.2.2
+    - No changes
 
     Version 1.2.1
     - Performance improvements
@@ -57,7 +63,7 @@ Function New-RegKey
 
 Function ClearTPM
 {
-    $TPM = Get-WmiObject -Class "Win32_Tpm" -Namespace "ROOT\CIMV2\Security\MicrosoftTpm"
+    $TPM = Get-CimInstance -ClassName "Win32_Tpm" -Namespace "ROOT\CIMV2\Security\MicrosoftTpm"
 
     Write-Output "Clearing TPM ownership....."
     $ClearRequest = $TPM.SetPhysicalPresenceRequest(14) | Out-Null
@@ -184,7 +190,7 @@ Function Get-DiskIndex
     # Set Disk to image to
     Update-StorageProviderCache -DiscoveryLevel Full | Out-Null
 
-    $SystemInformation = Get-WmiObject -Namespace root\wmi -Class MS_SystemInformation
+    $SystemInformation = Get-CimInstance -ClassName MS_SystemInformation -Namespace root\wmi
     $Product = $SystemInformation.SystemSKU
     $Disks = Get-Disk | Where-Object { $_.BusType -ne "USB"}
 
@@ -327,7 +333,7 @@ If ($NTCurrentVersion)
 
 Write-Output ""
 Write-Output "- Hardware Information"
-$SystemInformation = (Get-WmiObject -Namespace root\wmi -Class MS_SystemInformation)
+$SystemInformation = (Get-CimInstance -ClassName MS_SystemInformation -Namespace root\wmi)
 
 If ($SystemInformation)
 {

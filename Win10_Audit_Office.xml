@@ -84,7 +84,7 @@
                     <WillReboot>Never</WillReboot>
                 </RunSynchronousCommand>
                 <RunSynchronousCommand wcm:action="add">
-                    <Order>3</Order>
+                    <Order>4</Order>
                     <Description>Prepare OOBE...</Description>
                     <Path>powershell.exe -noprofile -File &quot;%TEMP%\SysprepToOOBE.ps1&quot;</Path>
                     <WillReboot>Never</WillReboot>

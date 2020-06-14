@@ -1,5 +1,5 @@
 <Configuration ID="2780dc3c-ef4d-4623-be8c-429e34b3b46b">
-    <Add OfficeClientEdition="64" Channel="Targeted" AllowCdnFallback="FALSE" ForceUpgrade="TRUE">
+    <Add OfficeClientEdition="64" Channel="Monthly" AllowCdnFallback="FALSE" ForceUpgrade="TRUE">
         <Product ID="O365ProPlusRetail">
             <Language ID="MatchOS" />
             <ExcludeApp ID="Access" />

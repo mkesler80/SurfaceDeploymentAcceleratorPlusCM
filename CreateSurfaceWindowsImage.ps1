@@ -14,16 +14,21 @@
 
     This script is provided AS-IS - usage of this source assumes that you are at the very least familiar with PowerShell, and the
     tools used to create and debug this script.
-
-    In other words, if you break it, you get to keep the pieces.
     
 .EXAMPLE
     .\CreateSurfaceWindowsImage.ps1 -ISO <ISO path> -OSSKU Pro -DestinationFolder "C:\Temp" -Device SurfacePro7
 
 .NOTES
     Author:       Microsoft
-    Last Update:  29th May 2020
-    Version:      1.2.2
+    Last Update:  14th June 2020
+    Version:      1.2.3
+
+    Version 1.2.3
+    - LocalDriverPath can now point to a flat (extracted) driver path, or a Surface platform MSI file
+    - Logging functionality added
+    - Changed all Get-WmiObject calls with Get-CimInstance calls to be more compatible with PowerShell Core
+    - Added registry tattoo
+    - Changed most boolean params from $false to $true by default to enable more features by default, to more closely match Surface image releases
 
     Version 1.2.2
     - Added USB drive picker
@@ -118,9 +123,9 @@ Param(
     [Parameter(
         Position=10,
         Mandatory=$False,
-        HelpMessage="Add Office 365 C2R (bool true/false, default is false)"
+        HelpMessage="Add Office 365 C2R (bool true/false, default is true)"
         )]
-        [bool]$Office365 = $False,
+        [bool]$Office365 = $True,
 
     [Parameter(
         Position=11,
@@ -133,16 +138,16 @@ Param(
     [Parameter(
         Position=12,
         Mandatory=$False,
-        HelpMessage="Create USB key when finished (bool true/false, default is false)"
+        HelpMessage="Create USB key when finished (bool true/false, default is true)"
         )]
-        [bool]$CreateUSB = $False,
+        [bool]$CreateUSB = $True,
 
     [Parameter(
         Position=13,
         Mandatory=$False,
-        HelpMessage="Create bootable ISO file (useful for testing) when finished (bool true/false, default is false)"
+        HelpMessage="Create bootable ISO file (useful for testing) when finished (bool true/false, default is true)"
         )]
-        [bool]$CreateISO = $False,
+        [bool]$CreateISO = $True,
 
     [Parameter(
         Position=14,
@@ -189,7 +194,7 @@ Param(
     [Parameter(
         Position=20,
         Mandatory=$False,
-        HelpMessage="Path to an extracted driver folder - required if you set UseLocalDriverPath variable to true or script will not find any drivers to inject"
+        HelpMessage="Path to an MSI or extracted driver folder - required if you set UseLocalDriverPath variable to true or script will not find any drivers to inject"
         )]
         [string]$LocalDriverPath
     )
@@ -197,15 +202,94 @@ Param(
 
 
 $OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding
+$global:SDAVersion = "1.2.3"
+
+
+# CMTrace-compatible logging
+# Borrowed from Adam the Automator on 10th June 2020:
+# https://adamtheautomator.com/building-logs-for-cmtrace-powershell/
+Function Start-Log
+{
+    Param (
+        [Parameter(Mandatory = $True)]
+        [ValidateScript({ Split-Path $_ -Parent | Test-Path })]
+	    [String]$FilePath,
+
+        [Parameter(Mandatory = $True)]
+        [String]$FileName
+    )
+	
+    Try
+    {
+        If (!(Test-Path $FilePath))
+	    {
+	        ## Create the log file
+	        New-Item $FilePath -ItemType directory | Out-Null
+            New-Item $FileName -ItemType file
+	    }
+		
+	    ## Set the global variable to be used as the FilePath for all subsequent Write-Log calls in this session
+	    $global:ScriptLogFilePath = "$FilePath\$FileName"
+    }
+    Catch
+    {
+        Write-Error $_.Exception.Message
+    }
+}
+
+
+
+# CMTrace-compatible logging
+# Modified from source:
+# https://adamtheautomator.com/building-logs-for-cmtrace-powershell/
+Function Write-Log
+{
+    Param (
+        [Parameter(Mandatory = $True)]
+        [String]$Message,
+		
+        [Parameter(Mandatory = $False)]
+        # 1 == "Informational"
+        # 2 == "Warning'
+        # 3 == "Error"
+        [ValidateSet(1, 2, 3)]
+        [Int]$LogLevel = 1,
+
+        [Parameter(Mandatory = $False)]
+	    [String]$LogFilePath = $ScriptLogFilePath,
+
+        [Parameter(Mandatory = $False)]
+        [String]$ScriptLineNumber
+    )
+
+    $TimeGenerated = "$(Get-Date -Format HH:mm:ss).$((Get-Date).Millisecond)+000"
+    $Line = '<![LOG[{0}]LOG]!><time="{1}" date="{2}" component="{3}" context="" type="{4}" thread="" file="">'
+    $LineFormat = $Message, $TimeGenerated, (Get-Date -Format MM-dd-yyyy), "$ScriptLineNumber", $LogLevel
+    $Line = $Line -f $LineFormat
+
+    #Add-Content -Path $LogFilePath -Value $Line
+    Out-File -InputObject $Line -Append -NoClobber -Encoding Default -FilePath $ScriptLogFilePath
+}
+
 
 
 Function Receive-Output
 {
     Param(
-        $Color
+        $Color,
+        $LogLevel,
+        $LogFile,
+        $LineNumber
     )
 
-    Process { Write-Host $_ -ForegroundColor $Color }
+    Process
+    {
+        Write-Host $_ -ForegroundColor $Color
+        If (($LogLevel) -or ($LogFile))
+        {
+            Write-Log -Message $_ -LogLevel $LogLevel -LogFilePath $ScriptLogFilePath -ScriptLineNumber $LineNumber
+        }
+    }
 }
 
 
@@ -238,7 +322,7 @@ Function Check-Internet
 {
     While (([Activator]::CreateInstance([Type]::GetTypeFromCLSID([Guid]‘{DCB00C01-570F-4A9B-8D69-199FDBA5723B}’)).IsConnectedToInternet) -eq $False)
     {
-        Write-Output "No internet connection detected. Retrying in 60 seconds..." | Receive-Output -Color Yellow
+        Write-Output "No internet connection detected. Retrying in 60 seconds..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep -Seconds 60
     }
 }
@@ -279,17 +363,17 @@ Function DownloadFile
     {
         $ActualURL = Get-RedirectedUrl -URL "$URL" -ErrorAction Continue -WarningAction Continue
         $FileName = $ActualURL.Substring($ActualURL.LastIndexOf("/") + 1)
-        Write-Output "aka.ms link: $URL" | Receive-Output -Color Gray
-        Write-Output "Actual URL:  $ActualURL" | Receive-Output -Color Gray
-        Write-Output "File name:   $FileName" | Receive-Output -Color White
+        Write-Output "aka.ms link: $URL" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output "Actual URL:  $ActualURL" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output "File name:   $FileName" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""
     }
     Else
     {
         $ActualURL = $URL
         $FileName = $URL.AbsoluteUri.Substring($URL.AbsoluteUri.LastIndexOf("/") +1)
-        Write-Output "Actual URL:  $URL" | Receive-Output -Color Gray
-        Write-Output "File name:   $FileName" | Receive-Output -Color White
+        Write-Output "Actual URL:  $URL" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output "File name:   $FileName" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""
     }
 
@@ -298,15 +382,15 @@ Function DownloadFile
     # If file does not exist, download file
     If (!(Test-Path -Path "$global:Output"))
     {
-        Write-Output "Using BITS to download files" | Receive-Output -Color White
-        Write-Output "Downloading $FileName to $Path..." | Receive-Output -Color White
+        Write-Output "Using BITS to download files" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output "Downloading $FileName to $Path..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""
         Import-Module BitsTransfer
         Start-BitsTransfer -Source $ActualURL -Destination "$global:Output" -Priority Foreground -RetryTimeout 60 -RetryInterval 120
     }
     Else
     {
-        Write-Output "File $global:Output exists, skipping file download." | Receive-Output -Color Gray
+        Write-Output "File $global:Output exists, skipping file download." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""
     }
 
@@ -323,8 +407,7 @@ Function GetInstalledAppStatus
         $AppVersion
     )
 
-
-    $OSArch = Get-WmiObject -Class Win32_OperatingSystem
+    $OSArch = Get-CimInstance -ClassName Win32_OperatingSystem
 
     If ($OSArch.OSArchitecture -eq "64-bit")
     {
@@ -372,15 +455,15 @@ Function PrereqCheck
     CheckIfRunAsAdmin
 
     # Windows Version Check
-    $OSCaption = (Get-WmiObject win32_operatingsystem).caption
+    $OSCaption = (Get-CimInstance -ClassName win32_operatingsystem).caption
     If ($OSCaption -like "Microsoft Windows 10*" -or $OSCaption -like "Microsoft Windows Server 2016*" -or $OSCaption -like "Microsoft Windows Server 2019*")
     {
         # All OK
     }
     Else
     {
-        Write-Warning "$Env:Computername You must use Windows 10 or Windows Server 2016/2019 when servicing Windows 10 offline, with the latest ADK installed."
-        Write-Warning "$Env:Computername Aborting script..."
+        Write-Output "$Env:Computername You must use Windows 10 or Windows Server 2016/2019 when servicing Windows 10 offline, with the latest ADK installed." | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output "$Env:Computername Aborting script..." | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Exit
     }
     
@@ -388,7 +471,7 @@ Function PrereqCheck
     # Validating that the ADK is installed
     If (!(Test-Path $DISMFile))
     {
-        Write-Warning "DISM in Windows ADK not found, attempting installation..." | Receive-Output -Color Yellow
+        Write-Output "DISM in Windows ADK not found, attempting installation..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""
         $global:Output = $null
         $global:IsInstalled = $null
@@ -413,7 +496,7 @@ Function PrereqCheck
                 {
                     $u = $u.UninstallString -Replace "/uninstall","" 
                     $u = $u.Trim()
-                    Write-Output "Command is $u Args are /uninstall /quiet" | Receive-Output -Color Gray
+                    Write-Output "Removing old 64bit ADK components.  Command is $u and args are /uninstall /quiet" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Start-Process -filepath $u -argumentlist "/uninstall /quiet" -wait
                 }
             }
@@ -424,7 +507,7 @@ Function PrereqCheck
                 {
                     $u = $u.UninstallString -Replace "/uninstall",""
                     $u = $u.Trim()
-                    Write-Output "Command is $u Args are /uninstall /quiet" | Receive-Output -Color Gray
+                    Write-Output "Removing old 32bit ADK components.  Command is $u and args are /uninstall /quiet" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Start-Process -filepath $u -argumentlist "/uninstall /quiet" -wait
                 }
             }
@@ -432,7 +515,7 @@ Function PrereqCheck
             If ((Test-Path -Path $ADKSourceFile) -eq $true)
             {
                 $SourceFilePath = $(Get-Item $SourceFile).FullName
-                Write-Output "Found Installation files for ADK at $SourceFilePath" | Receive-Output -Color Gray
+                Write-Output "Found Installation files for ADK at $SourceFilePath" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             }	
             Else
             {
@@ -445,24 +528,25 @@ Function PrereqCheck
 
             Try
             {
-                Write-Output "Installing Windows Assessment and Deployment Kit" | Receive-Output -Color White
-                Start-Process -File  $SourceFilePath -Arg $ADKArguments -passthru | wait-process
+                Write-Output "Installing Windows Assessment and Deployment Kit" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                Start-Process -File  $SourceFilePath -Arg $ADKArguments -passthru | Wait-Process
 
-                Write-Output  "$AppName - ADK INSTALLATION SUCCESSFULLY COMPLETED" | Receive-Output -Color Green
+                Write-Output "$AppName - ADK INSTALLATION SUCCESSFULLY COMPLETED" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Write-Output  ""
 
             }
             Catch
             {
-                Write-Output  "$AppName - INSTALLATION ERROR - check logs in $env:TEMP\adk for more info." | Receive-Output -Color Yellow
+                Write-Output "$AppName - INSTALLATION ERROR - check logs in $env:TEMP\adk for more info." | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Write-Output  ""
+                Exit
             }
         }
 
         If ((Test-Path -Path $WinPESourceFile) -eq $true)
         {
             $SourceFilePath = $(Get-Item $SourceFile).FullName
-            Write-Output "Found Installation files for ADK WinPE at $SourceFilePath" | Receive-Output -Color Gray
+            Write-Output "Found Installation files for ADK WinPE at $SourceFilePath" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         }	
         Else
         {
@@ -475,17 +559,18 @@ Function PrereqCheck
 
         Try
         {
-            Write-Output "Installing Windows Assessment and Deployment Kit Windows Preinstallation Environment Add-Ons" | Receive-Output -Color White
-            Start-Process -File  $SourceFilePath -Arg $WinPEArguments -passthru | wait-process
+            Write-Output "Installing Windows Assessment and Deployment Kit Windows Preinstallation Environment Add-Ons" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Start-Process -File  $SourceFilePath -Arg $WinPEArguments -passthru | Wait-Process
 
-            Write-Output  "$AppName - ADK WinPE Add-Ons INSTALLATION SUCCESSFULLY COMPLETED" | Receive-Output -Color Green
+            Write-Output  "$AppName - ADK WinPE Add-Ons INSTALLATION SUCCESSFULLY COMPLETED" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Write-Output  ""
         }
 
         Catch
         {
-            Write-Output  "$AppName - INSTALLATION ERROR - check logs in $env:TEMP\adkwinpeaddons for more info." | Receive-Output -Color Yellow
+            Write-Output  "$AppName - INSTALLATION ERROR - check logs in $env:TEMP\adkwinpeaddons for more info." | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Write-Output  ""
+            Exit
         }
     }
 }
@@ -529,7 +614,7 @@ Function Download-LatestUpdates
 
     If ($array.count -gt 0)
     {
-        If ($Servicing)
+        If ($Servicing -eq $True)
         {
             $global:KBGUID = $array | Where-Object {($_.description -like "*$Date*") -and ($_.description -like "*Servicing Stack Update for Windows 10*") -and ($_.description -like "*$OSBuild*") -and ($_.description -like "*$Architecture*")}
             If ($global:KBGUID.Count -gt 1)
@@ -538,7 +623,7 @@ Function Download-LatestUpdates
                 $global:KBGUID = $global:KBGUID | Where-Object {$_.description -eq $largest.Maximum}
             }
         }
-        If ($Cumulative)
+        If ($Cumulative -eq $True)
         {
             $global:KBGUID = $array | Where-Object {($_.description -like "*$Date*") -and ($_.description -like "*Cumulative Update for Windows 10*") -and ($_.description -like "*$OSBuild*") -and ($_.description -like "*$Architecture*")}
             If ($global:KBGUID.Count -gt 1)
@@ -547,11 +632,11 @@ Function Download-LatestUpdates
                 $global:KBGUID = $global:KBGUID | Where-Object {$_.description -eq $largest.Maximum}
             }
         }
-        If ($CumulativeDotNet)
+        If ($CumulativeDotNet -eq $True)
         {
             $global:KBGUID = $array | Where-Object {($_.description -like "*$Date*") -and ($_.description -like "*Cumulative Update for .NET Framework*") -and ($_.description -like "*Windows 10*") -and ($_.description -like "*$OSBuild*")}
         }
-        If ($Adobe)
+        If ($Adobe -eq $True)
         {
             $global:KBGUID = $array | Where-Object {($_.description -like "*$Date*") -and ($_.description -like "*Security Update for Adobe Flash Player for Windows 10*") -and ($_.description -like "*$OSBuild*")}
         }
@@ -587,8 +672,8 @@ Function Download-LatestUpdates
                 {
                     ForEach ($URL in $DownloadLinks)
                     {
-                        Write-Output "Download found:" | Receive-Output -Color Green
-                        Write-Output $curTxt | Receive-Output -Color White
+                        Write-Output "Download found:" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                        Write-Output $curTxt | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                         Write-Output ""
                         Write-Output ""
                         DownloadFile -URL $URL -Path "$Path"
@@ -601,8 +686,8 @@ Function Download-LatestUpdates
                 }
                 Else
                 {
-                    Write-Output "Download found:" | Receive-Output -Color Green
-                    Write-Output $curTxt | Receive-Output -Color White
+                    Write-Output "Download found:" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                    Write-Output $curTxt | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Write-Output ""
                     Write-Output ""
                     DownloadFile -URL $DownloadLinks -Path "$Path"
@@ -657,9 +742,9 @@ Function Get-LatestUpdates
     $CumulativeDotNetURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + ' "cumulative update for .NET Framework" ' + $Architecture + " windows 10 " + $OSBuild
     $AdobeURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + ' "Security Update for Adobe Flash Player for Windows 10" ' + $Architecture + " " + $OSBuild
 
-    If ($Servicing)
+    If ($Servicing -eq $True)
     {
-        Write-Output "Attempting to find and download Servicing Stack updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray
+        Write-Output "Attempting to find and download Servicing Stack updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $uri = $ServicingURI
         Download-LatestUpdates -uri $uri -Path $Path -Date $Date -Servicing $True -Cumulative $False -CumulativeDotNet $False -Adobe $False -OSBuild $OSBuild
         If (!($global:KBGUID))
@@ -672,7 +757,7 @@ Function Get-LatestUpdates
                     Start-Sleep 1
                     $NewDate = (Get-Date).AddMonths(-$LoopBreak)
                     $NewDate = $NewDate.ToString("yyyy-MM")
-                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow
+                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
                     $Date = $NewDate
                     $ServicingURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + " Servicing Stack " + $Architecture + " windows 10 " + $OSBuild
@@ -682,7 +767,7 @@ Function Get-LatestUpdates
                 }
                 Else
                 {
-                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow
+                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Break
                 }
             }
@@ -690,9 +775,9 @@ Function Get-LatestUpdates
         $LoopBreak = $null
         $Date = Get-Date -Format "yyyy-MM"
     }
-    If ($Cumulative)
+    If ($Cumulative -eq $True)
     {
-        Write-Output "Attempting to find and download Cumulative Update updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray
+        Write-Output "Attempting to find and download Cumulative Update updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $uri = $CumulativeURI
         Download-LatestUpdates -uri $uri -Path $Path -Date $Date -Servicing $False -Cumulative $True -CumulativeDotNet $False -Adobe $False -OSBuild $OSBuild
         If (!($global:KBGUID))
@@ -705,7 +790,7 @@ Function Get-LatestUpdates
                     Start-Sleep 1
                     $NewDate = (Get-Date).AddMonths(-$LoopBreak)
                     $NewDate = $NewDate.ToString("yyyy-MM")
-                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow
+                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
                     $Date = $NewDate
                     $CumulativeURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + ' "cumulative update for Windows 10" ' + $Architecture + " " + $OSBuild
@@ -715,7 +800,7 @@ Function Get-LatestUpdates
                 }
                 Else
                 {
-                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow
+                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Break
                 }
             }
@@ -723,9 +808,9 @@ Function Get-LatestUpdates
         $Date = Get-Date -Format "yyyy-MM"
         $LoopBreak = $null
     }
-    If ($CumulativeDotNet)
+    If ($CumulativeDotNet -eq $True)
     {
-        Write-Output "Attempting to find and download Cumulative .NET Framework Update updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray
+        Write-Output "Attempting to find and download Cumulative .NET Framework Update updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $uri = $CumulativeDotNetURI
         Download-LatestUpdates -uri $uri -Path $Path -Date $Date -Servicing $False -Cumulative $False -CumulativeDotNet $True -Adobe $False -OSBuild $OSBuild
         If (!($global:KBGUID))
@@ -738,7 +823,7 @@ Function Get-LatestUpdates
                     Start-Sleep 1
                     $NewDate = (Get-Date).AddMonths(-$LoopBreak)
                     $NewDate = $NewDate.ToString("yyyy-MM")
-                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow
+                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
                     $Date = $NewDate
                     $CumulativeDotNetURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + ' "cumulative update for .NET Framework" ' + $Architecture + " windows 10 " + $OSBuild
@@ -748,7 +833,7 @@ Function Get-LatestUpdates
                 }
                 Else
                 {
-                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow
+                    Write-Output "Unable to find update for past $LoopBreak months of searches.  Continuing..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Break
                 }
             }
@@ -756,22 +841,22 @@ Function Get-LatestUpdates
         $Date = Get-Date -Format "yyyy-MM"
         $LoopBreak = $null
     }
-    If ($Adobe)
+    If ($Adobe -eq $True)
     {
-        Write-Output "Attempting to find and download Adobe Flash Player updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray
+        Write-Output "Attempting to find and download Adobe Flash Player updates for $Architecture Windows 10 version $OSBuild for month $Date..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $uri = $AdobeURI
         Download-LatestUpdates -uri $uri -Path $Path -Date $Date -Servicing $False -Cumulative $False -CumulativeDotNet $False -Adobe $True -OSBuild $OSBuild
         If (!($global:KBGUID))
         {
             While (!($global:KBGUID))
             {
-                If ($LoopBreak -le 10)
+                If ($LoopBreak -le 11)
                 {
                     $LoopBreak++
                     Start-Sleep 1
                     $NewDate = (Get-Date).AddMonths(-$LoopBreak)
                     $NewDate = $NewDate.ToString("yyyy-MM")
-                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow
+                    Write-Output "No update found for month ($Date) - attempting previous month ($NewDate)..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
                     $Date = $NewDate
                     $AdobeURI = "http://www.catalog.update.microsoft.com/Search.aspx?q=" + $Date + ' "Security Update for Adobe Flash Player for Windows 10" ' + $Architecture + " " + $OSBuild
@@ -781,7 +866,7 @@ Function Get-LatestUpdates
                 }
                 Else
                 {
-                    Write-Output "Unable to find update for past $LoopBreak month's of searches.  Continuing..." | Receive-Output -Color Yellow
+                    Write-Output "Unable to find update for past $LoopBreak month's of searches.  Continuing..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Break
                 }
             }
@@ -804,7 +889,7 @@ Function ExtractMSIFile
 
     If (Test-Path "$Path\Extract")
     {
-        Write-Output "Deleting $Path\Extract\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $Path\Extract\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$Path\Extract\" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$Path\Extract" -Force
     }
@@ -813,7 +898,7 @@ Function ExtractMSIFile
         New-Item -Path "$Path\Extract" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Extracting file $MsiFile to $Path\Extract..." | Receive-Output -Color White
+    Write-Output "Extracting file $MsiFile to $Path\Extract..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Start-Process "msiexec" -ArgumentList "/a $MsiFile /qn TARGETDIR=$Path\Extract" -Wait -NoNewWindow
 }
 
@@ -895,8 +980,8 @@ Function Get-LatestSurfaceEthernetDrivers
                 {
                     ForEach ($URL in $DownloadLinks)
                     {
-                        Write-Output "Download found:" | Receive-Output -Color Green
-                        Write-Output $curTxt | Receive-Output -Color White
+                        Write-Output "Download found:" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                        Write-Output $curTxt | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                         Write-Output ""
                         Write-Output ""
                         $TempCAB = DownloadFile -URL $URL -Path "$DeviceDriverPath"
@@ -914,8 +999,8 @@ Function Get-LatestSurfaceEthernetDrivers
                 }
                 Else
                 {
-                    Write-Output "Download found:" | Receive-Output -Color Green
-                    Write-Output $curTxt | Receive-Output -Color White
+                    Write-Output "Download found:" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                    Write-Output $curTxt | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Write-Output ""
                     Write-Output ""
                     $TempCAB = DownloadFile -URL $DownloadLinks -Path "$DeviceDriverPath"
@@ -950,7 +1035,7 @@ Function Get-LatestDrivers
 
     If (Test-Path "$DeviceDriverPath")
     {
-        Write-Output "Deleting $DeviceDriverPath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $DeviceDriverPath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$DeviceDriverPath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$DeviceDriverPath" -Force
     }
@@ -963,33 +1048,39 @@ Function Get-LatestDrivers
     {
         If (!(Test-Path "$LocalDriverPath"))
         {
-            Write-Output "$LocalDriverPath not found, continuing without drivers..." | Receive-Output -Color Yellow
+            Write-Output "$LocalDriverPath not found, continuing without drivers..." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             $Device = $null
         }
         Else
         {
-            # Use local drivers
-            Write-Output "Using $LocalDriverPath..." | Receive-Output -Color White
-            $TempDeviceDriverPath = "$DeviceDriverPath\Extract"
-            If (Test-Path "$TempDeviceDriverPath")
+            $TempLocalDriverPath = (Get-Item $LocalDriverPath) -is [System.IO.DirectoryInfo]
+            If ($TempLocalDriverPath -eq $False)
             {
-                Write-Output "Deleting $TempDeviceDriverPath\..." | Receive-Output -Color Gray
-                Get-ChildItem -Path "$TempDeviceDriverPath" -Recurse | Remove-Item -Force -Recurse
-                Remove-Item -Path "$TempDeviceDriverPath" -Force
+                ExtractMSIFile -MsiFile $LocalDriverPath -Path "$DeviceDriverPath"
             }
-            If (!(Test-Path "$TempDeviceDriverPath"))
+            ElseIf ($TempLocalDriverPath -eq $True)
             {
-                New-Item -path "$TempDeviceDriverPath" -ItemType "directory" | Out-Null
+                $TempDeviceDriverPath = "$DeviceDriverPath\Extract"
+                If (Test-Path "$TempDeviceDriverPath")
+                {
+                    Write-Output "Deleting $TempDeviceDriverPath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                    Get-ChildItem -Path "$TempDeviceDriverPath" -Recurse | Remove-Item -Force -Recurse
+                    Remove-Item -Path "$TempDeviceDriverPath" -Force
+                }
+                If (!(Test-Path "$TempDeviceDriverPath"))
+                {
+                    New-Item -path "$TempDeviceDriverPath" -ItemType "directory" | Out-Null
+                }
+                # Use local drivers
+                Write-Output "Copying drivers from $LocalDriverPath to $TempDeviceDriverPath..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                & xcopy.exe /herky "$LocalDriverPath" "$TempDeviceDriverPath"
             }
-
-            Write-Output "Copying drivers from $LocalDriverPath to $TempDeviceDriverPath..." | Receive-Output -Color White
-            & xcopy.exe /herky "$LocalDriverPath" "$TempDeviceDriverPath"
             Write-Output ""
         }
     }
     Else
     {
-        Write-Output "Downloading latest drivers for $Device, Windows 10 version $global:OSVersion..." | Receive-Output -Color White
+        Write-Output "Downloading latest drivers for $Device, Windows 10 version $global:OSVersion..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $OSBuild = New-Object string (,@($global:OSVersion.ToCharArray() | Select-Object -Last 5))
 
         If ($Device -eq "SurfaceLaptop3Intel")
@@ -1010,16 +1101,23 @@ Function Get-LatestDrivers
         }
         
         $DownloadedFile = DownloadFile -URL $URL -Path "$DeviceDriverPath"
-        Write-Output "Downloaded File: $DownloadedFile"
+        Write-Output "Downloaded File: $DownloadedFile" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
         $FileToExtract = $DownloadedFile
         ExtractMSIFile -MsiFile $FileToExtract -Path $DeviceDriverPath
         Write-Output ""
     }
 
-    Write-Output "Downloading latest Surface Ethernet drivers for $Device..." | Receive-Output -Color White
-    Get-LatestSurfaceEthernetDrivers -Device $Device -TempFolder $TempFolder
-    Write-Output ""
+    If ($Device -eq "Custom")
+    {
+        # Nothing
+    }
+    Else
+    {
+        Write-Output "Downloading latest Surface Ethernet drivers for $Device..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Get-LatestSurfaceEthernetDrivers -Device $Device -TempFolder $TempFolder
+        Write-Output ""
+    }
 }
 
 
@@ -1036,7 +1134,7 @@ Function Get-LatestVCRuntimes
 
     If (Test-Path "$VisualCRuntimePath")
     {
-        Write-Output "Deleting $VisualCRuntimePath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $VisualCRuntimePath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$VisualCRuntimePath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$VisualCRuntimePath" -Force
     }
@@ -1053,7 +1151,7 @@ Function Get-LatestVCRuntimes
         New-Item -path "$VisualCRuntimePath\2019" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading latest VisualC++ Runtimes..." | Receive-Output -Color White
+    Write-Output "Downloading latest VisualC++ Runtimes..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 
     $VC2013x86URL = "https://aka.ms/vcpp2013x86"
     $VC2013x64URL = "https://aka.ms/vcpp2013x64"
@@ -1062,17 +1160,17 @@ Function Get-LatestVCRuntimes
 
     # 2013
     $VC2013x86 = DownloadFile -URL $VC2013x86URL -Path "$VisualCRuntimePath\2013"
-    Write-Output "Downloaded File: $VC2013x86"
+    Write-Output "Downloaded File: $VC2013x86" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
     $VC2013x64 = DownloadFile -URL $VC2013x64URL -Path "$VisualCRuntimePath\2013"
-    Write-Output "Downloaded File: $VC2013x64"
+    Write-Output "Downloaded File: $VC2013x64" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
     # 2019
     $VC2019x86 = DownloadFile -URL $VC2019x86URL -Path "$VisualCRuntimePath\2019"
-    Write-Output "Downloaded File: $VC2019x86"
+    Write-Output "Downloaded File: $VC2019x86" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
     $VC2019x64 = DownloadFile -URL $VC2019x64URL -Path "$VisualCRuntimePath\2019"
-    Write-Output "Downloaded File: $VC2019x64"
+    Write-Output "Downloaded File: $VC2019x64" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
 }
 
@@ -1092,7 +1190,7 @@ Function Get-Office365
 
     If (Test-Path "$Office365Path")
     {
-        Write-Output "Deleting $Office365Path\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $Office365Path\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$Office365Path" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$Office365Path" -Force    
     }
@@ -1101,21 +1199,22 @@ Function Get-Office365
         New-Item -Path "$Office365Path" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading Office 365 $Office365SKU..." | Receive-Output -Color White
+    Write-Output "Downloading Office 365 $Office365SKU..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     
     $Office365OfflineURL = "https://aka.ms/sdao365"
 
     $Office365TempFile = DownloadFile -URL $Office365OfflineURL -Path "$Office365Path"
-    Write-Output "Downloaded File: $Office365TempFile" | Receive-Output -Color White
+    Write-Output "Downloaded File: $Office365TempFile" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
 
-    Write-Output "Extracting Office 365 offline installer..." | Receive-Output -Color White
+    Write-Output "Extracting Office 365 offline installer..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Start-Process -FilePath "$Office365TempFile" -ArgumentList "/extract:$Office365Path /quiet" -Wait
     Write-Output ""
 
     If (!(Test-Path "$Office365Path\setup.exe"))
     {
         #File not downloaded, bail
+        Write-Output "Office offline setup file download appears to have failed.  Exiting..." | Receive-Output -Color Yellow -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Exit
     }
     Else
@@ -1130,7 +1229,7 @@ Function Get-Office365
         {
             $O365ProPlusDownloadXMLPath = "$Office365Path\O365_Download.xml"
         }
-        Write-Output "Downloading Office 365 offline package..." | Receive-Output -Color White
+        Write-Output "Downloading Office 365 offline package..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         $Argumentlist = "/download $O365ProPlusDownloadXMLPath"
         Set-Location -Path "$Office365Path"
         Start-Process -FilePath "$Office365Path\setup.exe" -ArgumentList $Argumentlist -Wait -WindowStyle Hidden
@@ -1152,7 +1251,7 @@ Function Get-AdobeFlashUpdates
 
     If (Test-Path "$adobeUpdatePath")
     {
-        Write-Output "Deleting $adobeUpdatePath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $adobeUpdatePath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$adobeUpdatePath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$adobeUpdatePath" -Force
     }
@@ -1161,7 +1260,7 @@ Function Get-AdobeFlashUpdates
         New-Item -path "$adobeUpdatePath" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading latest Adobe Flash update for $global:OSVersion..." | Receive-Output -Color White
+    Write-Output "Downloading latest Adobe Flash update for $global:OSVersion..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-LatestUpdates -Adobe $True -Path $adobeUpdatePath -OSBuild $global:ReleaseId -Architecture $Architecture
 }
 
@@ -1177,7 +1276,7 @@ Function Get-CumulativeUpdates
 
     If (Test-Path "$CumulativeUpdatePath")
     {
-        Write-Output "Deleting $CumulativeUpdatePath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $CumulativeUpdatePath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$CumulativeUpdatePath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$CumulativeUpdatePath" -Force
     }
@@ -1186,7 +1285,7 @@ Function Get-CumulativeUpdates
         New-Item -path "$CumulativeUpdatePath" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading latest Cumulative Update for $global:OSVersion..." | Receive-Output -Color White
+    Write-Output "Downloading latest Cumulative Update for $global:OSVersion..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-LatestUpdates -Cumulative $True -Path $CumulativeUpdatePath -OSBuild $global:ReleaseId -Architecture $Architecture
 }
 
@@ -1202,7 +1301,7 @@ Function Get-ServicingStackUpdates
 
     If (Test-Path "$ServicingStackPath")
     {
-        Write-Output "Deleting $ServicingStackPath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $ServicingStackPath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$ServicingStackPath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$ServicingStackPath" -Force
     }
@@ -1211,7 +1310,7 @@ Function Get-ServicingStackUpdates
         New-Item -Path "$ServicingStackPath" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading latest Servicing Stack update for $global:OSVersion..." | Receive-Output -Color White
+    Write-Output "Downloading latest Servicing Stack update for $global:OSVersion..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-LatestUpdates -Servicing $True -Path $ServicingStackPath -OSBuild $global:ReleaseId -Architecture $Architecture
 }
 
@@ -1227,7 +1326,7 @@ Function Get-CumulativeDotNetUpdates
 
     If (Test-Path "$CumulativeDotNetPath")
     {
-        Write-Output "Deleting $CumulativeDotNetPath\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $CumulativeDotNetPath\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$CumulativeDotNetPath" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$CumulativeDotNetPath" -Force
     }
@@ -1236,7 +1335,7 @@ Function Get-CumulativeDotNetUpdates
         New-Item -Path "$CumulativeDotNetPath" -ItemType "directory" | Out-Null
     }
 
-    Write-Output "Downloading latest Dot Net Cumulative updates for $global:OSVersion..." | Receive-Output -Color White
+    Write-Output "Downloading latest Dot Net Cumulative updates for $global:OSVersion..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-LatestUpdates -CumulativeDotNet $True -Path $CumulativeDotNetPath -OSBuild $global:ReleaseId -Architecture $Architecture
 }
 
@@ -1256,7 +1355,7 @@ Function Get-OSWIMFromISO
 
     If (Test-Path "$ScratchMountFolder")
     {
-        Write-Output "Deleting $ScratchMountFolder\..." | Receive-Output -Color Gray
+        Write-Output "Deleting $ScratchMountFolder\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$ScratchMountFolder" -Recurse | Remove-Item -Force -Recurse
         Remove-Item -Path "$ScratchMountFolder" -Force
     }
@@ -1265,22 +1364,22 @@ Function Get-OSWIMFromISO
         New-Item -path $ScratchMountFolder -ItemType Directory | Out-Null
     }
 
-    Write-Output "Mounting ISO $ISO..." | Receive-Output -Color White
+    Write-Output "Mounting ISO $ISO..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     $ISOPath = (Mount-DiskImage -ImagePath $ISO -StorageType ISO -PassThru | Get-Volume).DriveLetter
     $Drive = $ISOPath + ":"
 
     If ($ISOPath)
     {
-        Write-Output "ISO successfully mounted at $Drive" | Receive-Output -Color White
+        Write-Output "ISO successfully mounted at $Drive" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Write-Output ""   
     }
     Else
     {
-        Write-Output "Failed to mount the ISO. Please verify the ISO path and try again" | Receive-Output -Color Red
+        Write-Output "Failed to mount the ISO. Please verify the ISO path and try again" | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Exit
     }
 
-    Write-Output "Parsing install.wim file(s) in $Drive for images..." | Receive-Output -Color White
+    Write-Output "Parsing install.wim file(s) in $Drive for images..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     $WIMs = Get-ChildItem -Path "$Drive" -Filter install.wim -Recurse
     $OSWIMFound = $False
 
@@ -1297,7 +1396,7 @@ Function Get-OSWIMFromISO
         [Xml]$LanguagesXML = Get-Content $XmlPath
         $Editions = $LanguagesXML.Windows10.Editions.$OSSKU.Variants.Variant
 
-        Write-Output "Checking $TempWIM for valid images..."
+        Write-Output "Checking $TempWIM for valid images..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         ForEach ($Edition in $Editions)
         {
             ForEach ($OSImage in $OSImages)
@@ -1340,30 +1439,31 @@ Function Get-OSWIMFromISO
                 $ImageArch = "ARM64"
             }
             
-            Write-Output "Found image matching $OSSKU :" | Receive-Output -Color Gray
-            Write-Output "Path:          $ImagePath" | Receive-Output -Color White
-            Write-Output "Index:         $ImageIndex" | Receive-Output -Color White
-            Write-Output "Name:          $ImageName" | Receive-Output -Color White
-            Write-Output "Version:       $ImageVersion" | Receive-Output -Color White
-            Write-Output "Architecture:  $ImageArch" | Receive-Output -Color White
+            Write-Output "Found image matching $OSSKU :" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "Path:          $ImagePath" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "Index:         $ImageIndex" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "Name:          $ImageName" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "Version:       $ImageVersion" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "Architecture:  $ImageArch" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Write-Output ""
+            Start-Sleep 2
 
             $global:OSVersionFull = (Get-WindowsImage -ImagePath "$ImagePath" -Index "$ImageIndex").Version
             If ($global:OSVersionFull)
             {
                 $global:OSVersion = $global:OSVersionFull.Substring(0, $global:OSVersionFull.LastIndexOf('.'))
-                Write-Output "Mounting $ImagePath in $ScratchMountFolder..." | Receive-Output -Color White
+                Write-Output "Mounting $ImagePath in $ScratchMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Mount-WindowsImage -ImagePath $ImagePath -Index $ImageIndex -Path $ScratchMountFolder -ReadOnly | Out-Null
                 Start-Sleep 5
-                Write-Output "Querying image registry for ReleaseId..." | Receive-Output -Color White
+                Write-Output "Querying image registry for ReleaseId..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 & reg.exe load "HKLM\Mount" "$ScratchMountFolder\Windows\system32\config\SOFTWARE"
                 $Key = "HKLM:\Mount\Microsoft\Windows NT\CurrentVersion"
                 $global:ReleaseId = (Get-ItemProperty -Path $Key -Name ReleaseId).ReleaseId
                 Start-Sleep 5
-                Write-Output "Unloading image registry..." | Receive-Output -Color White
+                Write-Output "Unloading image registry..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 & reg.exe unload "HKLM\Mount"
                 Start-Sleep 5
-                Write-Output "Dismounting $ScratchMountFolder..."
+                Write-Output "Dismounting $ScratchMountFolder..." |Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Dismount-WindowsImage -Path $ScratchMountFolder  -Discard | Out-Null
                 Write-Output ""
             }
@@ -1378,7 +1478,7 @@ Function Get-OSWIMFromISO
     If ($OSImageFound -eq $False)
     {
         Dismount-DiskImage -ImagePath $ISO | Out-Null
-        Write-Output "$OSSKU not found in $WIMs on $ISO.  Please make sure to use an ISO file that contains $OSSKU, and try again." | Receive-Output -Color Red
+        Write-Output "$OSSKU not found in $WIMs on $ISO.  Please make sure to use an ISO file that contains $OSSKU, and try again." | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Exit
     }
 
@@ -1409,7 +1509,7 @@ Function Get-OSWIMFromISO
 
     If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp")
     {
-        Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp..." | Receive-Output -Color Gray
+        Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp" -Recurse -Filter *.wim | Remove-Item -Force -Recurse
         Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp" -Force -Recurse
     }
@@ -1433,22 +1533,22 @@ Function Get-OSWIMFromISO
 
         If ($TempExistingInstallWIMName -like "*$($OSSKU)*")
         {
-            Write-Output "Found existing WIM..."
+            Write-Output "Found existing WIM..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             $TempExistingInstallWIMOSVersionFull = (Get-WindowsImage -ImagePath "$TempExistingInstallWIMPath" -Index "$TempExistingInstallWIMIndex").Version
             #$TempExistingInstallWIMOSVersionFull = (& $DISMFile /Get-WimInfo /WimFile:$TempExistingInstallWIMPath /index:$TempExistingInstallWIMIndex | Select-String "Version ").ToString().Split(":")[1].Trim()
             $TempExistingInstallWIMOSVersion = $TempExistingInstallWIMOSVersionFull.Substring(0, $TempExistingInstallWIMOSVersionFull.LastIndexOf('.'))
-            Write-Output "Mounting $TempExistingInstallWIMPath in $ScratchMountFolder..." | Receive-Output -Color White
+            Write-Output "Mounting $TempExistingInstallWIMPath in $ScratchMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Mount-WindowsImage -ImagePath $TempExistingInstallWIMPath -Index $TempExistingInstallWIMIndex -Path $ScratchMountFolder -ReadOnly | Out-Null
             Start-Sleep 5
-            Write-Output "Querying image registry for ReleaseId..." | Receive-Output -Color White
+            Write-Output "Querying image registry for ReleaseId..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             & reg.exe load "HKLM\Mount" "$ScratchMountFolder\Windows\system32\config\SOFTWARE"
             $Key = "HKLM:\Mount\Microsoft\Windows NT\CurrentVersion"
             $TempExistingInstallWIMReleaseID = (Get-ItemProperty -Path $Key -Name ReleaseId).ReleaseId
             Start-Sleep 5
-            Write-Output "Unloading image registry..." | Receive-Output -Color White
+            Write-Output "Unloading image registry..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             & reg.exe unload "HKLM\Mount"
             Start-Sleep 5
-            Write-Output "Dismounting $ScratchMountFolder..."
+            Write-Output "Dismounting $ScratchMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Dismount-WindowsImage -Path $ScratchMountFolder  -Discard | Out-Null
             Write-Output ""
             # Specific 1909 check as it will report as 10.0.18362 still when offline
@@ -1459,24 +1559,24 @@ Function Get-OSWIMFromISO
 
             If ($TempExistingInstallWIMReleaseID -eq $global:ReleaseId)
             {            
-                Write-Output "Existing WIM version: $TempExistingInstallWIMOSVersionFull"
-                Write-Output "Checking against ISO WIM version $global:OSVersionFull..."
+                Write-Output "Existing WIM version: $TempExistingInstallWIMOSVersionFull" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+                Write-Output "Checking against ISO WIM version $global:OSVersionFull..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 If ($TempExistingInstallWIMOSVersionFull -eq $global:OSVersionFull)
                 {
                     $LeaveInstallWIM = $True
-                    Write-Output "Leaving existing install.wim in $ExistingInstallWIM, $TempExistingInstallWIMOSVersionFull equals $global:OSVersionFull." | Receive-Output -Color Gray
+                    Write-Output "Leaving existing install.wim in $ExistingInstallWIM, $TempExistingInstallWIMOSVersionFull equals $global:OSVersionFull." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Write-Output ""
                 }
                 Else
                 {
-                    Write-Output "Copying WIM from ISO, as existing WIM $ExistingInstallWIM does not match $global:OSVersion."
+                    Write-Output "Copying WIM from ISO, as existing WIM $ExistingInstallWIM does not match $global:OSVersion." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Write-Output ""
                 }
             }
         }
         Else
         {
-            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim..." | Receive-Output -Color Gray
+            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim" -Force
             Start-Sleep 5
         }
@@ -1484,7 +1584,7 @@ Function Get-OSWIMFromISO
     
     If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim")
     {
-        Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim..." | Receive-Output -Color Gray
+        Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim" -Force
         Start-Sleep 5
     }
@@ -1498,25 +1598,25 @@ Function Get-OSWIMFromISO
         $Arch = "arm64"
     }
 
-    Write-Output "Copying $WindowsKitsInstall\Windows Preinstallation Environment\$Arch\en-us\winpe.wim to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim..." | Receive-Output -Color White
+    Write-Output "Copying $WindowsKitsInstall\Windows Preinstallation Environment\$Arch\en-us\winpe.wim to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Copy-Item -Path "$WindowsKitsInstall\Windows Preinstallation Environment\$Arch\en-us\winpe.wim" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\boot.wim"
     $SourceBootWIMs = Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs" -filter boot.wim -Recurse
     ForEach ($SourceBootWIM in $SourceBootWIMs)
     {
         $TempBootWIM = $SourceBootWIM.FullName
-
         $PEWIM = Get-WindowsImage -ImagePath $TempBootWIM | Where-Object {$_.ImageName -like "*Windows PE*"}
 
         $ImagePath = $PEWIM.ImagePath
         $ImageIndex = $PEWIM.ImageIndex
         $ImageName = $PEWIM.ImageName
+        $global:WinPEVersion = (& $DISMFile /Get-WimInfo /WimFile:$ImagePath /index:$ImageIndex | Select-String "Version ").ToString().Split(":")[1].Trim()
     }
 
     If ($DotNet35 -eq $true)
     {
         If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs")
         {
-            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs..." | Receive-Output -Color Gray
+            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs" -Recurse | Remove-Item -Force -Recurse
             Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs" -Force
         }
@@ -1524,7 +1624,7 @@ Function Get-OSWIMFromISO
         {
             New-Item -path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs" -ItemType "directory" | Out-Null
         }
-        Write-Output "Copying $Drive\Sources\sxs\* to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs\..." | Receive-Output -Color White
+        Write-Output "Copying $Drive\Sources\sxs\* to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs\..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Copy-Item -Path "$Drive\Sources\sxs\*" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\sxs" -PassThru | Set-ItemProperty -Name IsReadOnly -Value $false
     }
 
@@ -1533,7 +1633,7 @@ Function Get-OSWIMFromISO
         ForEach ($WIM in $WIMs)
         {
             $TempWIM = $WIM.FullName
-            Write-Output "Copying $TempWIM to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim..." | Receive-Output -Color White
+            Write-Output "Copying $TempWIM to $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs\install.wim..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Copy-Item -Path $TempWIM -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs" -PassThru | Set-ItemProperty -Name IsReadOnly -Value $false
         }
     }
@@ -1561,14 +1661,14 @@ Function Add-PackageIntoWindowsImage
     If ($DismountImageOnCompletion -eq $True)
     {
         # Dismount the image to avoid PSFX/non-PSFX update compression issues in RS5+
-        Write-Output "Saving $TempImagePath..." | Receive-Output -Color White
+        Write-Output "Saving $TempImagePath..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         DisMount-WindowsImage -Path $ImageMountFolder -Save -CheckIntegrity
         Write-Output ""
         Write-Output ""
         Start-Sleep 2
 
         # Re-mount the image
-        Write-Output "Mounting $TempImagePath in $ImageMountFolder..." | Receive-Output -Color White
+        Write-Output "Mounting $TempImagePath in $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Mount-WindowsImage -ImagePath $TempImagePath -Index 1 -Path $ImageMountFolder -CheckIntegrity
         Write-Output ""
         Write-Output ""
@@ -1597,7 +1697,7 @@ Function UpdateMenu
         $selection
     )
 
-    cls
+    Clear-Host
 
     $UpA = [char]0x2191
     $DownA = [char]0x2193
@@ -1610,16 +1710,16 @@ Function UpdateMenu
     $itemCount = 0
     foreach($item in $MenuItems){
 
-        if($ShowOnlyLastFolder -eq $true){
+        If ($ShowOnlyLastFolder -eq $true){
             $line = [string]$(Split-Path -Path $item -Leaf)
-        } else {
+        } Else {
             $line = $item
         }
 
-        if($selection -eq $itemCount) {
+        If ($selection -eq $itemCount) {
             $itemCount++
             Write-Host -BackgroundColor White -ForegroundColor Black "$itemCount ] $line"
-        } else {
+        } Else {
             $itemCount++
             Write-Host -ForegroundColor White "$itemCount ] $line"
         }
@@ -1627,7 +1727,7 @@ Function UpdateMenu
     
     $viewSelection = $selection+1
     Write-Host -ForegroundColor White ("-"*($MenuTitle.Length + 4))
-    if($HelperText){
+    If ($HelperText) {
         Write-Host -ForegroundColor Yellow $HelperText
     }
     Write-Host -ForegroundColor White ">>: $viewSelection" -NoNewline
@@ -1651,7 +1751,7 @@ Function Select-MenuItem
         $ShowOnlyLastFolder
     )
 
-    cls
+    Clear-Host
     
     #Menu input type defines
     $ENTER = 13
@@ -1699,9 +1799,9 @@ Function Select-MenuItem
 
                 #$MenuItems.Count
                 $tempUI = $UserInput
-                if( ($UserInput -eq $null) -or (($UserInput.Length -gt 0) -and ($MenuItems.Count -lt 10)) ) {
+                If ( ($UserInput -eq $null) -or (($UserInput.Length -gt 0) -and ($MenuItems.Count -lt 10)) ) {
                     $tempUI = [string]"$num"
-                } else {
+                } Else {
                     $tempUI = $UserInput + [string]"$num"
                 }
                 #Below lines useful for debugging
@@ -1709,10 +1809,10 @@ Function Select-MenuItem
                 #[Threading.Thread]::Sleep( 1000 )
 
                 $UINum = [int]$tempUI
-                if( ($UINum -le 0) -or ($UINum -gt $MenuItems.Count) ) {
+                If( ($UINum -le 0) -or ($UINum -gt $MenuItems.Count) ) {
                     #out of range, reset
                     $UserInput = [string]($selection + 1)
-                } else {
+                } Else {
                     $UserInput = $tempUI
                     $selection = $UINum - 1
                 }
@@ -1725,12 +1825,12 @@ Function Select-MenuItem
 
             $BACKSPACE {
                 #Do back space stuff
-                if( $UserInput.Length -eq 1 ) {
+                If ( $UserInput.Length -eq 1 ) {
                     $UserInput = $null
                     $selection = 0
                 }
 
-                if( $UserInput.Length -gt 1 ) {
+                If ( $UserInput.Length -gt 1 ) {
                     $UserInput = $UserInput.Substring(0, $UserInput.Length-1)
                     $selection = ([int]$UserInput) - 1
                 }                
@@ -1758,7 +1858,7 @@ Function Select-USBDrive
 
     If ($DriveNumArray.Count -lt 1)
     {
-        Write-Host -ForegroundColor Red " -- No USB key Found."
+        Write-output " -- No USB key Found." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Return $null
     }
     
@@ -1767,6 +1867,267 @@ Function Select-USBDrive
     $diskName = $MenuArray[$SelectIndex]
 
     Write-Output   $diskNumToFlash
+}
+
+
+
+Function New-RegKey
+{
+    Param($key)
+  
+    $key = $key -replace ':',''
+    $parts = $key -split '\\'
+  
+    $tempkey = ''
+    $parts | ForEach-Object {
+        $tempkey += ($_ + "\")
+        If ( (Test-Path "Registry::$tempkey") -eq $false)
+        {
+            New-Item "Registry::$tempkey" | Out-Null
+        }
+    }
+}
+
+
+
+Function TattooRegistry
+{
+    Param(
+        [string]$ImageMountFolder,
+        [string]$RefImage,
+        [string]$SplitImage
+    )
+
+    $TempPath = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp"
+
+    & reg.exe load "HKLM\Mount" "$ImageMountFolder\Windows\system32\config\SOFTWARE"
+    $SDARegKey = "HKLM:\Mount\Microsoft\Surface\SDA"
+    New-RegKey $SDARegKey
+    
+    $ISORegValue = Get-ItemProperty $SDARegKey ISO -ErrorAction SilentlyContinue
+    $OSSKURegValue = Get-ItemProperty $SDARegKey OSSKU -ErrorAction SilentlyContinue
+    $DotNet35RegValue = Get-ItemProperty $SDARegKey DotNet35 -ErrorAction SilentlyContinue
+    $ServicingStackRegValue = Get-ItemProperty $SDARegKey ServicingStackUpdate -ErrorAction SilentlyContinue
+    $CumulativeUpdateRegValue = Get-ItemProperty $SDARegKey CumulativeUpdate -ErrorAction SilentlyContinue
+    $CumulativeDotNetUpdateRegValue = Get-ItemProperty $SDARegKey CumulativeDotNetUpdate -ErrorAction SilentlyContinue
+    $AdobeFlashUpdateRegValue = Get-ItemProperty $SDARegKey AdobeFlashUpdate -ErrorAction SilentlyContinue
+    $Office365RegValue = Get-ItemProperty $SDARegKey Office365 -ErrorAction SilentlyContinue
+    $DeviceRegValue = Get-ItemProperty $SDARegKey Device -ErrorAction SilentlyContinue
+    $DriverRegValue = Get-ItemProperty $SDARegKey Drivers -ErrorAction SilentlyContinue
+    $ImageRegValue = Get-ItemProperty $SDARegKey Image -ErrorAction SilentlyContinue
+    $OSVersionRegValue = Get-ItemProperty $SDARegKey OSVersion -ErrorAction SilentlyContinue
+    $ReleaseIDRegValue = Get-ItemProperty $SDARegKey ReleaseID -ErrorAction SilentlyContinue
+    $SDAVersionRegValue = Get-ItemProperty $SDARegKey SDAVersion -ErrorAction SilentlyContinue
+
+    $ISOFileName = $ISO.Substring($ISO.LastIndexOf("\") + 1)
+    If ($ISORegValue -eq $null)
+    {
+        New-ItemProperty -Path $SDARegKey -Name ISO -PropertyType STRING -Value $ISOFilename | Out-Null
+    }
+    Else
+    {
+        Set-ItemProperty -Path $SDARegKey -Name ISO -Value $ISOFileName
+    }
+
+    If ($OSSKURegValue -eq $null)
+    {
+        New-ItemProperty -Path $SDARegKey -Name OSSKU -PropertyType STRING -Value $OSSKU | Out-Null
+    }
+    Else
+    {
+        Set-ItemProperty -Path $SDARegKey -Name OSSKU -Value $OSSKU
+    }
+
+    If ($DotNet35 -eq $true)
+    {
+        If ($DotNet35RegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name DotNet35 -PropertyType STRING -Value $DotNet35 | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name DotNet35 -Value $DotNet35
+        }
+    }
+    
+    If ($ServicingStack = $true)
+    {
+        $PathToScan = "$TempPath\Servicing"
+        $FileName = (Get-ChildItem -Path $PathToScan).Name
+        If ($ServicingStackRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name ServicingStackUpdate -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name ServicingStackUpdate -Value $FileName
+        }
+    }
+
+    If ($CumulativeUpdate = $true)
+    {
+        $PathToScan = "$TempPath\Cumulative"
+        $FileName = (Get-ChildItem -Path $PathToScan).Name
+        If ($CumulativeUpdateRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name CumulativeUpdate -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name CumulativeUpdate -Value $FileName
+        }
+    }
+
+    If ($CumulativeDotNetUpdate = $true)
+    {
+        $PathToScan = "$TempPath\DotNet"
+        $FileName = (Get-ChildItem -Path $PathToScan).Name
+        If ($CumulativeDotNetUpdateRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name CumulativeDotNetUpdate -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name CumulativeDotNetUpdate -Value $FileName
+        }
+    }
+
+    If ($AdobeFlashUpdate = $true)
+    {
+        $PathToScan = "$TempPath\Adobe"
+        $FileName = (Get-ChildItem -Path $PathToScan).Name
+        If ($AdobeFlashUpdateRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name AdobeFlashUpdate -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name AdobeFlashUpdate -Value $FileName
+        }
+    }
+
+    If ($Office365 = $true)
+    {
+        $PathToScan = "$TempPath\Office365"
+        $FileName = (Get-ChildItem -Path $PathToScan -Recurse | Where-Object { ($_.PSIsContainer) -and ($_.Name -like "16.*") }).Name
+        If ($Office365RegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name Office365 -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name Office365 -Value $FileName
+        }
+    }
+
+    If ($Device)
+    {
+        If ($DeviceRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name Device -PropertyType STRING -Value $Device | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name Device -Value $Device
+        }
+    }
+
+    If (($Device) -or ($LocalDriverPath))
+    {
+        If ($LocalDriverPath)
+        {
+            $TempLocalDriverPath = (Get-Item $LocalDriverPath) -is [System.IO.DirectoryInfo]
+            If ($TempLocalDriverPath -eq $False)
+            {
+                $FileName = (Get-ChildItem -Path $LocalDriverPath).Name
+            }
+            Else
+            {
+                $FileName = (Get-ChildItem -Path $LocalDriverPath -Recurse | Where-Object { $_.Name -like "*.msi" }).Name
+            }
+        }
+        Else
+        {
+            If (Test-Path "$TempPath\$Device")
+            {
+                $TempLocalDriverPath = (Get-ChildItem -Path "$TempPath\$Device")
+                $FileName = (Get-ChildItem -Path "$Temppath\$Device" -Recurse | Where-Object { $_.Name -like "*.msi" }).Name
+            }
+        }
+
+        If ($DriverRegValue -eq $null)
+        {
+            New-ItemProperty -Path $SDARegKey -Name Drivers -PropertyType STRING -Value $FileName | Out-Null
+        }
+        Else
+        {
+            Set-ItemProperty -Path $SDARegKey -Name Drivers -Value $FileName
+        }
+    }
+
+    If (($RefImage) -or ($SplitImage))
+    {
+        If ($ImageRegValue -eq $null)
+        {
+            If (Test-path $RefImage)
+            {
+                If (Test-Path $SplitImage)
+                {
+                    $SplitImageName = (Get-Item -Path $SplitImage).Name
+                    If ($ImageRegValue -eq $null)
+                    {
+                        New-ItemProperty -Path $SDARegKey -Name Image -PropertyType STRING -Value $SplitImageName | Out-Null
+                    }
+                    Else
+                    {
+                        Set-ItemProperty -Path $SDARegKey -Name Image -Value $SplitImageName
+                    }
+                }
+                Else
+                {
+                    $RefImageName = (Get-Item -Path $RefImage).Name
+                    If ($ImageRegValue -eq $null)
+                    {
+                        New-ItemProperty -Path $SDARegKey -Name Image -PropertyType STRING -Value $RefImageName | Out-Null
+                    }
+                    Else
+                    {
+                        Set-ItemProperty -Path $SDARegKey -Name Image -Value $RefImageName
+                    }
+                }
+            }
+        }
+    }
+
+    If ($OSVersionRegValue -eq $null)
+    {
+        New-ItemProperty -Path $SDARegKey -Name OSVersion -PropertyType STRING -Value $Build | Out-Null
+    }
+    Else
+    {
+        Set-ItemProperty -Path $SDARegKey -Name OSVersion -Value $Build
+    }
+
+    If ($ReleaseIDRegValue -eq $null)
+    {
+        New-ItemProperty -Path $SDARegKey -Name ReleaseID -PropertyType STRING -Value $global:ReleaseID | Out-Null
+    }
+    Else
+    {
+        Set-ItemProperty -Path $SDARegKey -Name ReleaseID -Value $global:ReleaseID
+    }
+
+    If ($SDAVersionRegValue -eq $null)
+    {
+        New-ItemProperty -Path $SDARegKey -Name SDAVersion -PropertyType STRING -Value $global:SDAVersion | Out-Null
+    }
+    Else
+    {
+        Set-ItemProperty -Path $SDARegKey -Name SDAVersion -Value $global:SDAVersion
+    }
+
+
+    & reg.exe unload "HKLM\Mount"
 }
 
 
@@ -1792,7 +2153,6 @@ Function Update-Win10WIM
     )
 
     # Variables
-    $Now = Get-Date -Format yyyy-MM-dd_HH-mm-ss
     $TmpImage = "$TempFolder\tmp_install.wim"
     $TmpWinREImage = "$TempFolder\tmp_winre.wim"
     $TmpBootImage = "$TempFolder\tmp_boot.wim"
@@ -1808,9 +2168,11 @@ Function Update-Win10WIM
     $VC2019x64Path = "$TempFolder\VCRuntimes\2019\vc_redist.x64.exe"
     $ProUnattendXMLPath = "$WorkingDirPath\Win10Pro_Unattend.xml"
     $EntUnattendXMLPath = "$WorkingDirPath\Win10Ent_Unattend.xml"
+    $HubUnattendXMLPath = "$WorkingDirPath\Win10Hub_Unattend.xml"
     $OfficeAuditXMLPath = "$WorkingDirPath\Win10_Audit_Office.xml"
     $NoOfficeAuditXMLPath = "$WorkingDirPath\Win10_Audit_NoOffice.xml"
     $InstallOfficeScriptPath = "$WorkingDirPath\InstallOffice.ps1"
+    $SetTaskBarPinsScriptPath = "$WorkingDirPath\SetTaskBarPins.ps1"
     $SysprepToOOBEScriptPath = "$WorkingDirPath\SysprepToOOBE.ps1"
     
     $SourceName = Switch ($SourceName)
@@ -1825,27 +2187,27 @@ Function Update-Win10WIM
     Write-Output ""
     Write-Output ""
     
-    Write-Output ""
-    Write-Output ""
-    Write-Output " *********************************************" | Receive-Output -Color Cyan
-    Write-Output " *                                           *" | Receive-Output -Color Cyan
-    Write-Output " *           Updating install.wim            *" | Receive-Output -Color Cyan
-    Write-Output " *                                           *" | Receive-Output -Color Cyan
-    Write-Output " *********************************************" | Receive-Output -Color Cyan
-    Write-Output ""
-    Write-Output ""
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *           Updating install.wim            *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Start-Sleep 2
 
-    If ($InstallWIM)
+    If ($InstallWIM -eq $True)
     {
         # Export the reference image to a new (temporary) WIM - this will leave the original "install.wim" untouched when finished
-        Write-Output "Exporting $SourcePath\install.wim to $TmpImage..." | Receive-Output -Color White
+        Write-Output "Exporting $SourcePath\install.wim to $TmpImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Export-WindowsImage -SourceImagePath "$SourcePath\install.wim" -SourceName "$SourceName" -DestinationImagePath $TmpImage -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
         # Mount the image
-        Write-Output "Mounting $TmpImage in $ImageMountFolder..." | Receive-Output -Color White
+        Write-Output "Mounting $TmpImage in $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Mount-WindowsImage -ImagePath $TmpImage -Index 1 -Path $ImageMountFolder -CheckIntegrity
         Write-Output ""
         Write-Output ""
@@ -1853,32 +2215,32 @@ Function Update-Win10WIM
         If ($DotNet35 -eq $True)
         {
             # Cleanup the image BEFORE installing .NET to prevent errors
-            Write-Output "Running image cleanup on $ImageMountFolder..." | Receive-Output -Color White
+            Write-Output "Running image cleanup on $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             & $DISMFile /Image:$ImageMountFolder /Cleanup-Image /StartComponentCleanup /ResetBase
             Write-Output ""
             Write-Output ""
 
             # Dismount the image
-            Write-Output "Saving $TmpImage..." | Receive-Output -Color White
+            Write-Output "Saving $TmpImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             DisMount-WindowsImage -Path $ImageMountFolder -Save -CheckIntegrity
             Write-Output ""
             Write-Output ""
             Start-Sleep 2
 
             # Re-mount the image
-            Write-Output "Mounting $TmpImage in $ImageMountFolder..." | Receive-Output -Color White
+            Write-Output "Mounting $TmpImage in $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Mount-WindowsImage -ImagePath $TmpImage -Index 1 -Path $ImageMountFolder -CheckIntegrity
             Write-Output ""
             Write-Output ""
 
             # Add .NET Framework 3.5 to the image
-            Write-Output "Adding .NET Framework 3.5 to $ImageMountFolder..." | Receive-Output -Color White
+            Write-Output "Adding .NET Framework 3.5 to $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Enable-WindowsOptionalFeature -Path $ImageMountFolder -FeatureName NetFx3 -All -Source "$TempFolder\sxs" -LimitAccess
             Write-Output ""
             Write-Output ""
         }
 
-        If ($ServicingStack)
+        If ($ServicingStack -eq $True)
         {
             $SSU = Get-ChildItem -Path $ServicingStackPath
             If (!($SSU.Exists))
@@ -1888,12 +2250,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add required Servicing Stack updates
-                Write-Output "Adding Servicing Stack updates to $ImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Servicing Stack updates to $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpImage -DismountImageOnCompletion $True
             }
         }
 
-        If ($CumulativeUpdate)
+        If ($CumulativeUpdate -eq $True)
         {
             $CU = Get-ChildItem -Path $CumulativeUpdatePath
             If (!($CU.Exists))
@@ -1903,12 +2265,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add monthly Cumulative update
-                Write-Output "Adding Cumulative updates to $ImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Cumulative updates to $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpImage -DismountImageOnCompletion $False
             }
         }
 
-        If ($CumulativeDotNetUpdate)
+        If ($CumulativeDotNetUpdate -eq $True)
         {
             $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
             If (!($CUDN.Exists))
@@ -1918,12 +2280,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add monthly Cumulative update
-                Write-Output "Adding Cumulative .NET updates to $ImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Cumulative .NET updates to $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpImage -DismountImageOnCompletion $False
             }
         }
         
-        If ($AdobeFlashUpdate)
+        If ($AdobeFlashUpdate -eq $True)
         {
             $AFU = Get-ChildItem -Path $AdobeFlashUpdatePath
             If (!($AFU.Exists))
@@ -1933,7 +2295,7 @@ Function Update-Win10WIM
             Else
             {
                 # Add Adobe Flash updates
-                Write-Output "Adding Adobe Flash updates to $ImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Adobe Flash updates to $ImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $ImageMountFolder -PackagePath $AdobeFlashUpdatePath -TempImagePath $TmpImage -DismountImageOnCompletion $False
             }
         }
@@ -1943,7 +2305,7 @@ Function Update-Win10WIM
             # Copy Office 365 bits to device
             If (Test-Path "$ImageMountFolder\Windows\Temp\Office365")
             {
-                Write-Output "$ImageMountFolder\Windows\Temp\Office365..." | Receive-Output -Color Gray
+                Write-Output "$ImageMountFolder\Windows\Temp\Office365..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\Office365" -Recurse | Remove-Item -Force -Recurse
                 Remove-Item -Path "$ImageMountFolder\Windows\Temp\Office365" -Force
             }
@@ -1954,7 +2316,7 @@ Function Update-Win10WIM
 
             If (!($Architecture -eq "ARM64"))
             {
-                Write-Output "Copying Office365 files to $ImageMountFolder\Windows\Temp..."
+                Write-Output "Copying Office365 files to $ImageMountFolder\Windows\Temp..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Copy-Item -Path $InstallOfficeScriptPath -Destination "$Office365Path\InstallOffice.ps1" -Force -ErrorAction Continue
                 & xcopy.exe /herky "$Office365Path" "$ImageMountFolder\Windows\Temp\Office365"
                 Write-Output ""
@@ -1965,7 +2327,7 @@ Function Update-Win10WIM
         {
             $MSIFiles = Get-ChildItem -Path $DeviceDriverPath -Recurse
             # Add drivers/firmware to WIM
-            Write-Output "Adding Driver updates for $Device to $ImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
+            Write-Output "Adding Driver updates for $Device to $ImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Add-WindowsDriver -Path $ImageMountFolder -Driver "$DeviceDriverPath" -Recurse
             Write-Output ""
             Write-Output ""
@@ -1973,7 +2335,7 @@ Function Update-Win10WIM
             # Copy VC++ Runtimes
             If (Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2013")
             {
-                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2013..." | Receive-Output -Color Gray
+                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2013..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2013" -Recurse | Remove-Item -Force -Recurse
                 Remove-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2013" -Force
             }
@@ -1984,7 +2346,7 @@ Function Update-Win10WIM
 
             If (Test-Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019")
             {
-                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2019..." | Receive-Output -Color Gray
+                Write-Output "Deleting $ImageMountFolder\Windows\Temp\VCRuntimes\2019..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Get-ChildItem -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019" -Recurse | Remove-Item -Force -Recurse
                 Remove-Item -Path "$ImageMountFolder\Windows\Temp\VCRuntimes\2019" -Force
             }
@@ -1996,7 +2358,7 @@ Function Update-Win10WIM
 
         If (!($Architecture -eq "ARM64"))
         {
-            Write-Output "Copying VC++ Runtime binaries to $ImageMountFolder\Windows\Temp..."
+            Write-Output "Copying VC++ Runtime binaries to $ImageMountFolder\Windows\Temp..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Copy-Item -Path $VC2013x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
             Copy-Item -Path $VC2013x64Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2013"
             Copy-Item -Path $VC2019x86Path -Destination "$ImageMountFolder\Windows\Temp\VCRuntimes\2019"
@@ -2004,16 +2366,18 @@ Function Update-Win10WIM
             Write-Output ""
         }
 
-        Write-Output "Copying files to disk for unattended installation..."
+        Write-Output "Copying files to disk for unattended installation..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Copy-Item -Path $SysprepToOOBEScriptPath -Destination "$ImageMountFolder\Windows\Temp\SysprepToOOBE.ps1" -Force -ErrorAction Continue
-        If ($Office365)
+        If ($Office365 -eq $True)
         {
             Copy-Item -Path $OfficeAuditXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml" -Force -ErrorAction Continue
+            Copy-Item -Path $SetTaskBarPinsScriptPath -Destination "$ImageMountFolder\Windows\Temp\SetTaskBarPins.ps1" -Force -ErrorAction Continue
         }
         Else
         {
             Copy-Item -Path $NoOfficeAuditXMLPath -Destination "$ImageMountFolder\Windows\System32\sysprep\unattend.xml" -Force -ErrorAction Continue
         }
+
 
         If ($OSSKU -like "*Pro*")
         {
@@ -2026,31 +2390,32 @@ Function Update-Win10WIM
         Write-Output ""
 
 
-        Write-Output ""
-        Write-Output ""
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *           Updating winre.wim              *" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output ""
-        Write-Output ""
+
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *           Updating winre.wim              *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep 2
 
 
         # Copy WinRE Image to temp location
-        Write-Output "Copying WinRE image to $TmpWinREImage..." | Receive-Output -Color White
+        Write-Output "Copying WinRE image to $TmpWinREImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Move-Item -Path "$ImageMountFolder\Windows\System32\Recovery\winre.wim" -Destination $TmpWinREImage
         Write-Output ""
         Write-Output ""
 
         # Mount the temp WinRE Image
-        Write-Output "Mounting $TmpWinREImage to $WinREImageMountFolder..." | Receive-Output -Color White
+        Write-Output "Mounting $TmpWinREImage to $WinREImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Mount-WindowsImage -ImagePath $TmpWinREImage -Index 1 -Path $WinREImageMountFolder -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
-        If ($ServicingStack)
+        If ($ServicingStack -eq $True)
         {
             $SSU = Get-ChildItem -Path $ServicingStackPath
             If (!($SSU.Exists))
@@ -2060,12 +2425,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add Servicing Stack updates to the WinRE image 
-                Write-Output "Adding Servicing Stack updates to $WinREImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Servicing Stack updates to $WinREImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $True
             }
         }
 
-        If ($CumulativeUpdate)
+        If ($CumulativeUpdate -eq $True)
         {
             $CU = Get-ChildItem -Path $CumulativeUpdatePath
             If (!($CU.Exists))
@@ -2075,7 +2440,7 @@ Function Update-Win10WIM
             Else
             {
                 # Add monthly Cumulative updates to the WinRE image
-                Write-Output "Adding Cumulative updates to $WinREImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Cumulative updates to $WinREImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $WinREImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpWinREImage -DismountImageOnCompletion $False
             }
         }
@@ -2086,7 +2451,7 @@ Function Update-Win10WIM
             If ($SurfaceDevices.$Device)
             {
                 # Add system-level drivers to WIM
-                Write-Output "Adding Driver updates for $Device to $WinREImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
+                Write-Output "Adding Driver updates for $Device to $WinREImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 $Drivers = $SurfaceDevices.$Device.Drivers.Driver
                 ForEach ($Driver in $Drivers)
                 {
@@ -2105,46 +2470,46 @@ Function Update-Win10WIM
         }
 
         # Cleanup the WinRE image
-        Write-Output "Running image cleanup on $TmpWinREImage..." | Receive-Output -Color White
+        Write-Output "Running image cleanup on $TmpWinREImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         & $DISMFile /Image:$WinREImageMountFolder /Cleanup-Image /StartComponentCleanup /ResetBase
         Write-Output ""
         Write-Output ""
 
         # Dismount the WinRE image
-        Write-Output "Saving $TmpWinREImage..." | Receive-Output -Color White
+        Write-Output "Saving $TmpWinREImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         DisMount-WindowsImage -Path $WinREImageMountFolder -Save -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
 
-        Write-Output ""
-        Write-Output ""
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *            Saving winre.wim               *" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output ""
-        Write-Output ""
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *            Saving winre.wim               *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep 2
 
 
         # Export the new WinRE image back to original location
-        Write-Output "Exporting $TmpWinREImage to $ImageMountFolder\Windows\System32\Recovery\winre.wim..." | Receive-Output -Color White
+        Write-Output "Exporting $TmpWinREImage to $ImageMountFolder\Windows\System32\Recovery\winre.wim..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Export-WindowsImage -SourceImagePath $TmpWinREImage -SourceName "Microsoft Windows Recovery Environment (x64)" -DestinationImagePath "$ImageMountFolder\Windows\System32\Recovery\winre.wim" -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
 
-        Write-Output ""
-        Write-Output ""
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *            Saving install.wim             *" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output ""
-        Write-Output ""
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *            Saving install.wim             *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep 2
 
 
@@ -2165,14 +2530,18 @@ Function Update-Win10WIM
             $SplitImage = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Generic-Install-$Build-$OSSKU-$Now--Split.swm"
         }
 
+        Write-Output "Adding registry tattoo..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output ""
+        TattooRegistry -ImageMountFolder $ImageMountFolder -RefImage $RefImage -SplitImage $SplitImage
+
         # Dismount the reference image
-        Write-Output "Saving $TmpImage..." | Receive-Output -Color White
+        Write-Output "Saving $TmpImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         DisMount-WindowsImage -Path $ImageMountFolder -Save -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
         # Export the image to a new WIM
-        Write-Output "Exporting $TmpImage to $RefImage..." | Receive-Output -Color White
+        Write-Output "Exporting $TmpImage to $RefImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Export-WindowsImage -SourceImagePath $TmpImage -SourceName "$SourceName" -DestinationImagePath $RefImage -CheckIntegrity
         Write-Output ""
         Write-Output ""
@@ -2183,7 +2552,7 @@ Function Update-Win10WIM
         {
             $SplitWIM = $true
             # Split the WIM to fit on FAT32-formatted media (splitting at ~3GB for simplicity)
-            Write-Output "Splitting $RefImage into 3GB files as $SplitImage..." | Receive-Output -Color White
+            Write-Output "Splitting $RefImage into 3GB files as $SplitImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Split-WindowsImage -ImagePath $RefImage -SplitImagePath $SplitImage -FileSize 3096 -CheckIntegrity
             Write-Output ""
             Write-Output ""
@@ -2214,20 +2583,20 @@ Function Update-Win10WIM
     If ($UpdateBootWIM -eq $True)
     {
 
-        Write-Output ""
-        Write-Output ""
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *           Updating boot.wim               *" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output ""
-        Write-Output ""
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *           Updating boot.wim               *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep 2
 
 
         # Copy boot.wim for editing
-        Write-Output "Copying $SourcePath\boot.wim to $TmpBootImage..." | Receive-Output -Color White
+        Write-Output "Copying $SourcePath\boot.wim to $TmpBootImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Copy-Item "$SourcePath\boot.wim" $TempFolder
         Attrib -r "$TempFolder\boot.wim"
         Rename-Item -Path "$TempFolder\boot.wim" -NewName "$TmpBootImage"
@@ -2236,13 +2605,13 @@ Function Update-Win10WIM
 
 
         # Mount index 1 of the boot image (WinPE)
-        Write-Output "Mounting $TmpBootImage to $BootImageMountFolder using Index 1..." | Receive-Output -Color White
+        Write-Output "Mounting $TmpBootImage to $BootImageMountFolder using Index 1..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Mount-WindowsImage -ImagePath $TmpBootImage -Index 1 -Path $BootImageMountFolder -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
 
-        If ($ServicingStack)
+        If ($ServicingStack -eq $True)
         {
             $SSU = Get-ChildItem -Path $ServicingStackPath
             If (!($SSU.Exists))
@@ -2252,12 +2621,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add required Servicing Stack updates
-                Write-Output "Adding Servicing Stack updates to $BootImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Servicing Stack updates to $BootImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $ServicingStackPath -TempImagePath $TmpBootImage -DismountImageOnCompletion $True
             }
         }
 
-        If ($CumulativeUpdate)
+        If ($CumulativeUpdate -eq $True)
         {
             $CU = Get-ChildItem -Path $CumulativeUpdatePath
             If (!($CU.Exists))
@@ -2267,12 +2636,12 @@ Function Update-Win10WIM
             Else
             {
                 # Add monthly Cumulative update
-                Write-Output "Adding Cumulative updates to $BootImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Cumulative updates to $BootImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $CumulativeUpdatePath -TempImagePath $TmpBootImage -DismountImageOnCompletion $False
             }
         }
 
-        If ($CumulativeDotNetUpdate)
+        If ($CumulativeDotNetUpdate -eq $True)
         {
             $CUDN = Get-ChildItem -Path $CumulativeDotNetPath
             If (!($CUDN.Exists))
@@ -2282,7 +2651,7 @@ Function Update-Win10WIM
             Else
             {
                 # Add monthly Cumulative update
-                Write-Output "Adding Cumulative .NET updates to $BootImageMountFolder..." | Receive-Output -Color White
+                Write-Output "Adding Cumulative .NET updates to $BootImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Add-PackageIntoWindowsImage -ImageMountFolder $BootImageMountFolder -PackagePath $CumulativeDotNetPath -TempImagePath $TmpBootImage -DismountImageOnCompletion $False
             }
         }
@@ -2293,7 +2662,7 @@ Function Update-Win10WIM
             If ($SurfaceDevices.$Device)
             {
                 # Add system-level drivers to WIM
-                Write-Output "Adding Driver updates for $Device to $BootImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White
+                Write-Output "Adding Driver updates for $Device to $BootImageMountFolder from $DeviceDriverPath..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 $Drivers = $SurfaceDevices.$Device.Drivers.Driver
                 ForEach ($Driver in $Drivers)
                 {
@@ -2321,53 +2690,53 @@ Function Update-Win10WIM
             $WinPEOCPath = "$WindowsKitsInstall\Windows Preinstallation Environment\arm64\WinPE_OCs"
         }
 
-        Write-Output "Adding WMI..." | Receive-Output -Color White
+        Write-Output "Adding WMI..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-WMI.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-WMI_en-us.cab" | Out-Null
 
-        Write-Output "Adding PE Scripting..." | Receive-Output -Color White
+        Write-Output "Adding PE Scripting..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-Scripting.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-Scripting_en-us.cab" | Out-Null
 
-        Write-Output "Adding Enhanced Storage..." | Receive-Output -Color White
+        Write-Output "Adding Enhanced Storage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-EnhancedStorage.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-EnhancedStorage_en-us.cab" | Out-Null
 
-        Write-Output "Adding Bitlocker support..." | Receive-Output -Color White
+        Write-Output "Adding Bitlocker support..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-SecureStartup.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-SecureStartup_en-us.cab" | Out-Null
 
-        Write-Output "Adding .NET..." | Receive-Output -Color White
+        Write-Output "Adding .NET..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-NetFx.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-NetFx_en-us.cab" | Out-Null
 
-        Write-Output "Adding PowerShell..." | Receive-Output -Color White
+        Write-Output "Adding PowerShell..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-PowerShell.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-PowerShell_en-us.cab" | Out-Null
 
-        Write-Output "Adding Storage WMI..." | Receive-Output -Color White
+        Write-Output "Adding Storage WMI..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-StorageWMI.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-StorageWMI_en-us.cab" | Out-Null
 
-        Write-Output "Adding DISM support..." | Receive-Output -Color White
+        Write-Output "Adding DISM support..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-DismCmdlets.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-DismCmdlets_en-us.cab" | Out-Null
 
-        Write-Output "Adding Secure Boot support..." | Receive-Output -Color White
+        Write-Output "Adding Secure Boot support..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-SecureBootCmdlets.cab" | Out-Null
 
-        Write-Output "Adding Secure Startup support..." | Receive-Output -Color White
+        Write-Output "Adding Secure Startup support..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-DismCmdlets.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-DismCmdlets_en-us.cab" | Out-Null
 
-        Write-Output "Adding WinRE support..." | Receive-Output -Color White
+        Write-Output "Adding WinRE support..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\WinPE-WinReCfg.cab" | Out-Null
         Add-WindowsPackage -Path $BootImageMountFolder -PackagePath "$WinPEOCPath\en-us\WinPE-WinReCfg_en-us.cab" | Out-Null
 
 
         If (($MakeUSBMedia) -or ($MakeISOMedia))
         {
-            Write-Host "Copying scripts to $BootImageMountFolder..."
+            Write-Output "Copying scripts to $BootImageMountFolder..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Copy-Item -Path "$WorkingDirPath\UsbImage\CreatePartitions-UEFI.txt" -Destination $BootImageMountFolder
             Copy-Item -Path "$WorkingDirPath\UsbImage\CreatePartitions-UEFI_Source.txt" -Destination $BootImageMountFolder
             Copy-Item -Path "$WorkingDirPath\UsbImage\Imaging.ps1" -Destination $BootImageMountFolder
@@ -2379,15 +2748,15 @@ Function Update-Win10WIM
         Write-Output ""
 
 
-        Write-Output ""
-        Write-Output ""
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *            Saving boot.wim                *" | Receive-Output -Color Cyan
-        Write-Output " *                                           *" | Receive-Output -Color Cyan
-        Write-Output " *********************************************" | Receive-Output -Color Cyan
-        Write-Output ""
-        Write-Output ""
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *            Saving boot.wim                *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Start-Sleep 2
 
 
@@ -2408,13 +2777,13 @@ Function Update-Win10WIM
 
 
         # Dismount the boot image
-        Write-Output "Saving $TmpBootImage..." | Receive-Output -Color White
+        Write-Output "Saving $TmpBootImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         DisMount-WindowsImage -Path $BootImageMountFolder -Save -CheckIntegrity
         Write-Output ""
         Write-Output ""
 
         # Export the image to a new WIM
-        Write-Output "Exporting $TmpBootImage to $RefBootImage..." | Receive-Output -Color White
+        Write-Output "Exporting $TmpBootImage to $RefBootImage..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         Export-WindowsImage -SourceImagePath $TmpBootImage -SourceIndex 1 -DestinationImagePath $RefBootImage -CheckIntegrity
         Write-Output ""
         Write-Output ""
@@ -2434,7 +2803,7 @@ Function Update-Win10WIM
     {
         If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media")
         {
-            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media\..." | Receive-Output -Color Gray
+            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media" -Recurse | Remove-Item -Force -Recurse
             Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media" -Force
         }
@@ -2445,7 +2814,7 @@ Function Update-Win10WIM
 
         If (Test-Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles")
         {
-            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles\..." | Receive-Output -Color Gray
+            Write-Output "Deleting $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Get-ChildItem -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles" -Recurse | Remove-Item -Force -Recurse
             Remove-Item -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles" -Force
         }
@@ -2463,7 +2832,7 @@ Function Update-Win10WIM
             $Arch = "arm64"
         }
 
-        Write-Output "Creating WinPE media in $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media..." | Receive-Output -Color White
+        Write-Output "Creating WinPE media in $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
         & xcopy.exe /herky "$WindowsKitsInstall\Windows Preinstallation Environment\$Arch\Media" "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media"
         Copy-Item -Path "$WindowsKitsInstall\Deployment Tools\$Arch\Oscdimg\efisys.bin" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles"
         Copy-Item -Path "$WindowsKitsInstall\Deployment Tools\$Arch\Oscdimg\etfsboot.com" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles"
@@ -2479,10 +2848,10 @@ Function Update-Win10WIM
         Copy-Item -Path "$WorkingDirPath\UsbImage\Install.cmd" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media"
         Copy-Item -Path "$WorkingDirPath\UsbImage\startnet.cmd" -Destination "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media"
         
-        If ($MakeUSBMedia)
+        If ($MakeUSBMedia -eq $True)
         {
-            Write-Output "Insert USB drive 16GB+ in size, and press ENTER" | Receive-Output -Color Yellow
-            Write-Output "      !!!THIS WILL FORMAT THE DRIVE!!!" | Receive-Output -Color Yellow
+            Write-Output "Insert USB drive 16GB+ in size, and press ENTER" | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Write-Output "      !!!THIS WILL FORMAT THE DRIVE!!!" | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Write-Output ""
             PAUSE
             Start-Sleep 5
@@ -2509,7 +2878,7 @@ Function Update-Win10WIM
 
                 If ( $UserInput -ne "y" )
                 {
-                    Write-Output " -- Aborting Operation" | Receive-Output -Color Yellow
+                    Write-Output " -- Aborting Operation" | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 }
                 Else
                 {
@@ -2533,7 +2902,7 @@ Function Update-Win10WIM
 
                     $NewUSBDriveLetter = $NewUSBDriveLetter.DriveLetter + ":"
 
-                    Write-Output "Copying WinPE Media contents to $NewUSBDriveLetter..." | Receive-Output -Color White
+                    Write-Output "Copying WinPE Media contents to $NewUSBDriveLetter..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     & bootsect.exe /nt60 $NewUSBDriveLetter /force /mbr
                     & xcopy /herky "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\Media" $NewUSBDriveLetter
     
@@ -2543,20 +2912,20 @@ Function Update-Win10WIM
                         ForEach ($TempWIM in $SplitWIMs)
                         {
                             $TempSplitWIM = $TempWIM.FullName
-                            Write-Output "Copying $TempSplitWIM to $NewUSBDriveLetter..." | Receive-Output -Color White
+                            Write-Output "Copying $TempSplitWIM to $NewUSBDriveLetter..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                             Copy-Item -Path "$TempSplitWIM" -Destination "$NewUSBDriveLetter\Sources" -Force
                         }
                     }
                     Else
                     {
-                        Write-Output "Copying $RefImage to $NewUSBDriveLetter..." | Receive-Output -Color White
+                        Write-Output "Copying $RefImage to $NewUSBDriveLetter..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                         Copy-Item -Path "$RefImage" -Destination "$NewUSBDriveLetter\Sources" -Recurse
                     }
                 }
             }
         }
 
-        If ($MakeISOMedia)
+        If ($MakeISOMedia -eq $True)
         {
             $oscdimg = "$WindowsKitsInstall\Deployment Tools\$Arch\Oscdimg\oscdimg.exe"
             $efisys = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp\fwfiles\efisys.bin"
@@ -2570,13 +2939,13 @@ Function Update-Win10WIM
                 ForEach ($TempWIM in $SplitWIMs)
                 {
                     $TempSplitWIM = $TempWIM.FullName
-                    Write-Output "Copying $TempSplitWIM to $MediaSource..." | Receive-Output -Color White
+                    Write-Output "Copying $TempSplitWIM to $MediaSource..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                     Copy-Item -Path "$TempSplitWIM" -Destination "$MediaSource\Sources" -Force
                 }
             }
             Else
             {
-                Write-Output "Copying $RefImage to $MediaSource..." | Receive-Output -Color White
+                Write-Output "Copying $RefImage to $MediaSource..." | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
                 Copy-Item -Path "$RefImage" -Destination "$MediaSource\Sources" -Recurse
             }
 
@@ -2585,37 +2954,37 @@ Function Update-Win10WIM
     }
 
 
-    Write-Output ""
-    Write-Output ""
-    Write-Output " *********************************************" | Receive-Output -Color Cyan
-    Write-Output " *                                           *" | Receive-Output -Color Cyan
-    Write-Output " *       Image modifications complete!       *" | Receive-Output -Color Cyan
-    Write-Output " *                                           *" | Receive-Output -Color Cyan
-    Write-Output " *********************************************" | Receive-Output -Color Cyan
-    Write-Output ""
-    Write-Output ""
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *       Image modifications complete!       *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Start-Sleep 2
 
     Set-Location -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture"
-    Write-Output "Finalized image files can be found here:" | Receive-Output -Color White
+    Write-Output "Finalized image files can be found here:" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
-    If ($CreateISO)
+    If ($CreateISO -eq $True)
     {
         If (Test-Path("$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso"))
         {
-            Write-Output "ISO:      $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso" | Receive-Output -Color Green
+            Write-Output "ISO:      $DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
             Write-Output ""
         }
     }
     If ($SplitWIM -eq $True)
     {
-        Write-Output "Install:  $SplitImage" | Receive-Output -Color Green
+        Write-Output "Install:  $SplitImage" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     }
     Else
     {
-        Write-Output "Install:  $RefImage" | Receive-Output -Color Green
+        Write-Output "Install:  $RefImage" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     }
-    Write-Output "Boot:     $RefBootImage" | Receive-Output -Color Green
+    Write-Output "Boot:     $RefBootImage" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
 }
 
@@ -2636,6 +3005,19 @@ If (!($DestinationFolder))
 }
 
 
+# Get script start time (will be used to determine how long execution takes)
+$Script_Start_Time = (Get-Date).ToShortDateString()+", "+(Get-Date).ToLongTimeString()
+$Now = Get-Date -Format yyyy-MM-dd_HH-mm-ss
+
+# Start logging
+$SourcePath = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\SourceWIMs"
+$TempFolder = "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\Temp"
+$LogFilePath = "$DestinationFolder\Logs"
+$LogFileName = "Log--$OSSKU-$Architecture--$Now.log"
+Start-Log -FilePath $LogFilePath -FileName $LogFileName
+Write-Output "Script start: $Script_Start_Time" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+
+
 If ($Device)
 {
     # Read WinPEXML file
@@ -2644,11 +3026,6 @@ If ($Device)
     
     $SurfaceDevices = $WinPEXML.Surface.Devices
 }
-
-
-# Get script start time (will be used to determine how long execution takes)
-$Script_Start_Time = (Get-Date).ToShortDateString()+", "+(Get-Date).ToLongTimeString()
-Write-Output "Script start: $Script_Start_Time" | Receive-Output -Color Gray
 
 
 # Necessary variables not passed into script directly
@@ -2665,44 +3042,44 @@ AddHeaderSpace
 PrereqCheck
 
 
-Write-Output ""
-Write-Output ""
-Write-Output " *********************************************" | Receive-Output -Color Cyan
-Write-Output " *                                           *" | Receive-Output -Color Cyan
-Write-Output " *       Parameters passed to script:        *" | Receive-Output -Color Cyan
-Write-Output " *                                           *" | Receive-Output -Color Cyan
-Write-Output " *********************************************" | Receive-Output -Color Cyan
-Write-Output ""
-Write-Output "ISO path:                     $ISO" | Receive-Output -Color White
-Write-Output "OS SKU:                       $OSSKU" | Receive-Output -Color White
-Write-Output "Architecture:                 $Architecture" | Receive-Output -Color White
-Write-Output "Output:                       $DestinationFolder" | Receive-Output -Color White
-Write-Output "  .NET 3.5:                   $DotNet35" | Receive-Output -Color White
-Write-Output "  Servicing Stack:            $ServicingStack" | Receive-Output -Color White
-Write-Output "  Cumulative Update:          $CumulativeUpdate" | Receive-Output -Color White
-Write-Output "  Cumulative DotNet Updates:  $CumulativeDotNetUpdate" | Receive-Output -Color White
-Write-Output "  Adobe Flash Player Updates: $AdobeFlashUpdate" | Receive-Output -Color White
-Write-Output "  Office 365 install:         $Office365" | Receive-Output -Color White
+Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " *       Parameters passed to script:        *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "ISO path:                     $ISO" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "OS SKU:                       $OSSKU" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "Architecture:                 $Architecture" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "Output:                       $DestinationFolder" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  .NET 3.5:                   $DotNet35" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Servicing Stack:            $ServicingStack" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Cumulative Update:          $CumulativeUpdate" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Cumulative DotNet Updates:  $CumulativeDotNetUpdate" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Adobe Flash Player Updates: $AdobeFlashUpdate" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Office 365 install:         $Office365" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 If ($Device)
 {
-    Write-Output "  Device drivers:             $Device" | Receive-Output -Color White
+    Write-Output "  Device drivers:             $Device" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 }
 If ($UseLocalDriverPath -eq $True)
 {
-    Write-Output "  Use Local driver path:      $LocalDriverPath" | Receive-Output -Color White
+    Write-Output "  Use Local driver path:      $LocalDriverPath" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 }
-Write-Output "  Create USB key:             $CreateUSB" | Receive-Output -Color White
-Write-Output "  Create ISO:                 $CreateISO" | Receive-Output -Color White
-Write-Output ""
-Write-Output ""
+Write-Output "  Create USB key:             $CreateUSB" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Create ISO:                 $CreateISO" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Start-Sleep 2
 
 
 # Pull Windows 10 version and SKU from ISO provided by script param, returns OSVersion and WinPEVersion variable as well
 Get-OSWIMFromISO -ISO $ISO -OSSKU $OSSKU -DestinationFolder $DestinationFolder -Architecture $Architecture -WindowsKitsInstall $WindowsKitsInstall -ScratchMountFolder $ScratchMountFolder
 Start-Sleep 2
-Write-Output "OSVersion:  $global:OSVersion" | Receive-Output -Color White
-Write-Output "ReleaseId:  $global:ReleaseId" | Receive-Output -Color White
+Write-Output "OSVersion:  $global:OSVersion" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "ReleaseId:  $global:ReleaseId" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Write-Output ""
 Start-Sleep 5
 
@@ -2717,7 +3094,7 @@ $WinREImageMountFolder = "$Mount\WinREImage"
 
 If (Test-Path "$ImageMountFolder")
 {
-    Write-Output "Deleting $ImageMountFolder\..." | Receive-Output -Color Gray
+    Write-Output "Deleting $ImageMountFolder\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-ChildItem -Path "$ImageMountFolder" -Recurse | Remove-Item -Force -Recurse
     Remove-Item -Path "$ImageMountFolder" -Force
 }
@@ -2728,7 +3105,7 @@ If (!(Test-Path -path $ImageMountFolder))
 
 If (Test-Path "$BootImageMountFolder")
 {
-    Write-Output "Deleting $BootImageMountFolder\..." | Receive-Output -Color Gray
+    Write-Output "Deleting $BootImageMountFolder\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-ChildItem -Path "$BootImageMountFolder" -Recurse | Remove-Item -Force -Recurse
     Remove-Item -Path "$BootImageMountFolder" -Force
 }
@@ -2739,7 +3116,7 @@ If (!(Test-Path -path $BootImageMountFolder))
 
 If (Test-Path "$WinREImageMountFolder")
 {
-    Write-Output "Deleting $WinREImageMountFolder\..." | Receive-Output -Color Gray
+    Write-Output "Deleting $WinREImageMountFolder\..." | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Get-ChildItem -Path "$WinREImageMountFolder" -Recurse | Remove-Item -Force -Recurse
     Remove-Item -Path "$WinREImageMountFolder" -Force
 }
@@ -2749,7 +3126,7 @@ If (!(Test-Path -path $WinREImageMountFolder))
 }
 
 
-If ($BootWIM)
+If ($BootWIM -eq $true)
 {
     $UpdateBootWIM = $True
 }
@@ -2818,7 +3195,7 @@ $Script_End_Time = (Get-Date).ToShortDateString()+", "+(Get-Date).ToLongTimeStri
 $Script_Time_Taken = New-TimeSpan -Start $Script_Start_Time -End $Script_End_Time
 
 # How long did this take?
-Write-Output "Script start: $Script_Start_Time" | Receive-Output -Color Gray
-Write-Output "Script end:   $Script_End_Time" | Receive-Output -Color Gray
+Write-Output "Script start: $Script_Start_Time" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "Script end:   $Script_End_Time" | Receive-Output -Color Gray -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Write-Output ""
-Write-Output "Execution time: $Script_Time_Taken seconds" | Receive-Output -Color White
+Write-Output "Execution time: $Script_Time_Taken seconds" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
