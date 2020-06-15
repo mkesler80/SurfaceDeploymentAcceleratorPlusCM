@@ -212,8 +212,7 @@ Function Start-Log
 {
     Param (
         [Parameter(Mandatory = $True)]
-        [ValidateScript({ Split-Path $_ -Parent | Test-Path })]
-	    [String]$FilePath,
+	[String]$FilePath,
 
         [Parameter(Mandatory = $True)]
         [String]$FileName
