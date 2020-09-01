@@ -2,21 +2,13 @@
 .SYNOPSIS
     This script partitions the disk and applies a WIM or SWM files and sets recovery.
 
-    // *************
-    // *  CAUTION  *
-    // *************
-
-    Please review this script THOROUGHLY before applying, and disable changes below as necessary to suit your current environment.
-
-    This script is provided AS-IS - usage of this source assumes that you are at the very least familiar with PowerShell, and the
-    tools used to create and debug this script.
-
-    In other words, if you break it, you get to keep the pieces.
-    
 .NOTES
     Author:       Microsoft
-    Last Update:  10th June 2020
-    Version:      1.2.3
+    Last Update:  31st August 2020
+    Version:      1.2.5.3
+
+    Version 1.2.5.3
+    - Match master package version
 
     Version 1.2.3
     - Changed all Get-WmiObject calls with Get-CimInstance calls to be more compatible with PowerShell Core
@@ -41,7 +33,11 @@
 #>
 
 
+
+$SDAVersion = "1.2.5.3"
 cls
+
+
 
 Function New-RegKey
 {
@@ -291,7 +287,10 @@ If ($ExecutionContext.SessionState.LanguageMode -eq "FullLanguage")
 $scriptPath = Split-Path -parent $MyInvocation.MyCommand.Definition
 
 
-
+Write-Output "SDA version:  $SDAVersion"
+Start-Sleep 2
+Write-Output ""
+Write-Output ""
 Write-Output "********************"
 Write-Output "  OS IMAGE INSTALL  "
 Write-Output "********************"

@@ -6,7 +6,7 @@
                 <RunSynchronousCommand wcm:action="add">
                     <Order>1</Order>
                     <Description>PowerShell Execution Policy</Description>
-                    <Path>powershell.exe -noprofile -command &quot;Set-ExecutionPolicy RemoteSigned -Force&quot;</Path>
+                    <Path>powershell.exe -noprofile -command &quot;Set-ExecutionPolicy Restricted -Force&quot;</Path>
                 </RunSynchronousCommand>
                 <RunSynchronousCommand wcm:action="add">
                     <Order>2</Order>

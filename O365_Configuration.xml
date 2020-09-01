@@ -1,4 +1,4 @@
-<Configuration ID="e2451c49-eac2-42a1-917a-c79c7761f384">
+<Configuration>
   <Add OfficeClientEdition="64" Channel="Monthly" SourcePath="%TEMP%\Office365" AllowCdnFallback="FALSE">
     <Product ID="O365ProPlusRetail">
       <Language ID="MatchOS" />
@@ -10,7 +10,7 @@
     </Product>
   </Add>
   <Property Name="SharedComputerLicensing" Value="0" />
-  <Property Name="PinIconsToTaskbar" Value="TRUE" />
+  <Property Name="PinIconsToTaskbar" Value="FALSE" />
   <Property Name="SCLCacheOverride" Value="0" />
   <Property Name="AUTOACTIVATE" Value="0" />
   <Property Name="FORCEAPPSHUTDOWN" Value="FALSE" />

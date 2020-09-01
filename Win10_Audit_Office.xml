@@ -84,6 +84,12 @@
                     <WillReboot>Never</WillReboot>
                 </RunSynchronousCommand>
                 <RunSynchronousCommand wcm:action="add">
+                    <Order>3</Order>
+                    <Description>Configure Taskbar Default Pins...</Description>
+                    <Path>powershell.exe -noprofile -File &quot;%TEMP%\SetTaskBarPins.ps1&quot;</Path>
+                    <WillReboot>Never</WillReboot>
+                </RunSynchronousCommand>
+                <RunSynchronousCommand wcm:action="add">
                     <Order>4</Order>
                     <Description>Prepare OOBE...</Description>
                     <Path>powershell.exe -noprofile -File &quot;%TEMP%\SysprepToOOBE.ps1&quot;</Path>
