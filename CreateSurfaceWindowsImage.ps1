@@ -10,7 +10,7 @@
 
 .NOTES
     Author:       Microsoft
-    Last Update:  20th October 2020
+    Last Update:  21st October 2020
     Version:      1.2.5.4
 
     Version 1.2.5.4
@@ -147,7 +147,7 @@ Param(
         Mandatory=$False,
         HelpMessage="Surface device type to add drivers to image for, if not specified no drivers injected - Custom can be used if using with a non-Surface device"
         )]
-        [ValidateSet('SurfacePro4', 'SurfacePro5', 'SurfacePro6', 'SurfacePro7', 'SurfaceLaptop', 'SurfaceLaptop2', 'SurfaceLaptop3Intel', 'SurfaceLaptop3AMD', 'SurfaceLaptopGo', 'SurfaceBook', 'SurfaceBook2', 'SurfaceBook3', 'SurfaceStudio', 'SurfaceStudio2', 'SurfaceGo', 'SurfaceGoLTE', 'SurfaceGo2', 'SurfaceHub2', 'Custom')]
+        [ValidateSet('SurfacePro4', 'SurfacePro5', 'SurfacePro6', 'SurfacePro7', 'SurfaceLaptop', 'SurfaceLaptop2', 'SurfaceLaptopGo', 'SurfaceLaptop3Intel', 'SurfaceLaptop3AMD', 'SurfaceLaptopGo', 'SurfaceBook', 'SurfaceBook2', 'SurfaceBook3', 'SurfaceStudio', 'SurfaceStudio2', 'SurfaceGo', 'SurfaceGoLTE', 'SurfaceGo2', 'SurfaceHub2', 'Custom')]
         [string]$Device = "SurfacePro7",
 
     [Parameter(
