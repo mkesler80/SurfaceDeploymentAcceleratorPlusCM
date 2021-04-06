@@ -9,9 +9,13 @@
     .\CreateSurfaceWindowsImage.ps1 -ISO <ISO path> -OSSKU Pro -DestinationFolder "C:\Temp" -Device SurfacePro7
 
 .NOTES
-    Author:       Microsoft
-    Last Update:  20th January 2021
-    Version:      1.2.5.5
+    Author:       Matt Kesler
+    Last Update:  5th April 2021
+    Version:      1.2.5.6
+
+    Version 1.2.5.6
+    - Added Configuration Manager Boot and Install WIM import
+    - New Parameters CMWIMImport, CMSiteCode, CMSiteServer, CMFileShare
 
     Version 1.2.5.5
     - Added support for Surface Pro 7+
@@ -216,12 +220,39 @@ Param(
         Mandatory=$False,
         HelpMessage="Path to an MSI or extracted driver folder - required if you set UseLocalDriverPath variable to true or script will not find any drivers to inject"
         )]
-        [string]$LocalDriverPath
+        [string]$LocalDriverPath,
+
+    [Parameter(
+        Position=21,
+        Mandatory=$False,
+        HelpMessage="Import generated boot image and device image into Endpoint Manager - requires CM admin console installation"
+        )]
+        [Bool]$CMWIMImport = $False,
+
+    [Parameter(
+        Position=22,
+        Mandatory=$False,
+        HelpMessage="Site code where WIM will be imported"
+        )]
+        [String]$CMSiteCode,
+    
+    [Parameter(
+        Position=23,
+        Mandatory=$False,
+        HelpMessage="Configuration Manager site server for specified site code"
+        )]
+        [String]$CMSiteServer,
+    [Parameter(
+        Position=24,
+        Mandatory=$False,
+        HelpMessage="UNC path of share to store boot image and OS image"
+        )]
+        [String]$CMFileShare
     )
 
 
 
-$SDAVersion = "1.2.5.4"
+$SDAVersion = "1.2.5.6"
 $OutputEncoding = [console]::InputEncoding = [console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 
 
@@ -356,6 +387,18 @@ Function Check-Internet
 }
 
 
+Function Get-CMConsoleInstallStatus
+{
+    Write-Output "Checking Configuration Manager Admin Console installation" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    try{
+        Test-Path $env:SMS_ADMIN_UI_PATH
+    }
+    catch [System.Management.Automation.ParameterBindingException]{        
+        Write-Output “Configuration Manager Console not installed or Enviroment Variable not set!`nPlease install the Configuration Manager Console and re-run this script.” | Receive-Output -Color Red -BGColor Black -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"    
+        break
+    }
+
+}
 
 Function Get-RedirectedUrl
 {
@@ -2415,7 +2458,8 @@ Function Update-Win10WIM
         [string]$TempFolder,
         [string]$WindowsKitsInstall,
         [bool]$MakeUSBMedia,
-        [bool]$MakeISOMedia
+        [bool]$MakeISOMedia,
+        [bool]$CMAddWIM
     )
 
     # Variables
@@ -3274,9 +3318,6 @@ Function Update-Win10WIM
     Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Start-Sleep 2
 
-    Set-Location -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture"
-    Write-Output "Finalized image files can be found here:" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
-    Write-Output ""
     If ($CreateISO)
     {
         If (Test-Path("$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture\$Device-$Build-$Now.iso"))
@@ -3295,8 +3336,81 @@ Function Update-Win10WIM
     }
     Write-Output "Boot:     $RefBootImage" | Receive-Output -Color Green -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
     Write-Output ""
-}
 
+    If($CMAddWIM){
+        
+        $RefImageName = (Get-Item -Path $RefImage).Name
+        $RefBootImageName = (Get-Item -Path $RefBootImage).Name
+
+        
+        
+        If($CMFileShare.EndsWith('\')){
+            $CMFileShare = $CMFileShare.TrimEnd('\')
+        }
+
+        $dirStructure = "$($CMFileShare)\SDA\$($device)", "$($CMFileShare)\SDA\$($device)\OS", "$($CMFileShare)\SDA\$($device)\Boot"
+
+        If(!(Test-Path "$($CMFileShare)\SDA\$($device)")){
+
+        Write-Output "Creating directory structure in $CMFileShare see log for more details"`
+        | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        New-Item -ItemType directory $dirStructure | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})" | Out-Null            
+        }
+
+        Write-Output "Copying Boot Image to Share" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Copy-Item "Microsoft.PowerShell.Core\FileSystem::$($RefBootImage)" -Destination "Microsoft.PowerShell.Core\FileSystem::$($CMFileShare)\SDA\$($Device)\Boot"
+        
+        Write-Output "Copying OS Image to Share" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Copy-Item "Microsoft.PowerShell.Core\FileSystem::$($RefImage)" -Destination "Microsoft.PowerShell.Core\FileSystem::$($CMFileShare)\SDA\$($Device)\OS"
+
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *    Connecting to Configuration Manager    *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    
+        Try{
+            Write-Output "Looking for existing PSDrive for Configuration Manager site $CMSiteCode" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Get-PSDrive -Name $CMSiteCode -ErrorAction Stop | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})" | Out-Null
+        }catch [System.Management.Automation.DriveNotFoundException]{
+            Write-Output "PSDrive for site code $CMSiteCode does not exist.`nMapping $CMSiteCode PSDrive." | Receive-Output -Color Yellow -LogLevel 2 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            Import-Module $env:SMS_ADMIN_UI_PATH\..\ConfigurationManager.psd1 -Force | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+            New-PSDrive -name $CMSiteCode -PSProvider "AdminUI.PS.Provider\CMSite" -Root $CMSiteServer -Description "ConfigMgr Site" | Out-Null
+        }    
+        Write-Output "Successfully connected to Configuration Manager Site" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Set-Location "$($CMSiteCode):\"
+    
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *           Importing WIMs                  *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *                                           *" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " *********************************************" | Receive-Output -Color Cyan -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        
+        Write-Output "Importing Boot Image" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        New-CMBootImage -path "$($CMFileShare)\SDA\$($Device)\Boot\$($RefBootImageName)" -Index 1 -Name "$($Device) Boot Image" `
+        -Description "$($Architecture) WinPE Boot Image for $($Device) - Generated by Surface Deployment Accelerator" `
+        | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})" | Out-Null
+    
+        Write-Output "Importing OS Image" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        New-CMOperatingSystemImage -path "$($CMFileShare)\SDA\$($Device)\OS\$($RefImageName)" -Name "$($Device) $($Architecture) W10 $($OSSKU)" `
+        -Description "$($Architecture) Windows 10 Enterprise image for $($Device) - Generated by Surface Deployment Accelerator" `
+        | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})" | Out-Null
+
+        Set-Location -Path "$DestinationFolder\$OSSKU\$global:OSVersion\$Architecture"
+        Write-Output "Finalized image files can be found here:" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        Write-Output ""
+        Remove-PSDrive -Name $CMSiteCode
+    }
+
+}
 
 
 ###########################
@@ -3388,6 +3502,10 @@ Write-Output "  Cumulative Update:          $CumulativeUpdate" | Receive-Output 
 Write-Output "  Cumulative DotNet Updates:  $CumulativeDotNetUpdate" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Write-Output "  Adobe Flash Player Updates: $AdobeFlashUpdate" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Write-Output "  Office 365 install:         $Office365" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  Import WIMs to CM:          $CMWIMImport" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  CM Site Code:               $CMSiteCode" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  CM Site Server:             $CMSiteServer" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+Write-Output "  CM File Share:              $CMFileShare" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 If ($Device)
 {
     Write-Output "  Device drivers:             $Device" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
@@ -3401,6 +3519,18 @@ Write-Output "  Create ISO:                 $CreateISO" | Receive-Output -Color 
 Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Write-Output " " | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
 Start-Sleep 2
+
+<# Check CM Console Install if CM Import is True
+   Want script to exit prior to image creation if
+   CM console is not installed or site code and server are not specified#>
+If($CMWIMImport){
+    Get-CMConsoleInstallStatus | Out-Null
+    Write-Output "Configruation Manager Admin Console is installed" | Receive-Output -Color White -LogLevel 1 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+    If($Null -eq $CMSiteCode -or $Null -eq $CMSiteServer){
+        Write-Output "CM Site Code and Site Server are required for WIM import.`Re-Run script with -CMSiteCode and -CMSiteServer parameters specified" | Receive-Output -Color Red -LogLevel 3 -LineNumber "$($Invocation.MyCommand.Name):$( & {$MyInvocation.ScriptLineNumber})"
+        break
+    }
+}
 
 
 # Pull Windows 10 version and SKU from ISO provided by script param, returns OSVersion and WinPEVersion variable as well
@@ -3515,7 +3645,12 @@ If ($AdobeFlashUpdate -eq $True)
 
 
 # Add Servicing Stack / Cumulative updates and necessary drivers to install.wim, winre.wim, and boot.wim
-Update-Win10WIM -SourcePath $SourcePath -SourceName $OSSKU -ServicingStack $ServicingStack -CumulativeUpdate $CumulativeUpdate -DotNet35 $DotNet35 -CumulativeDotNetUpdate $CumulativeDotNetUpdate -AdobeFlashUpdate $AdobeFlashUpdate -ImageMountFolder $ImageMountFolder -BootImageMountFolder $BootImageMountFolder -WinREImageMountFolder $WinREImageMountFolder -TempFolder $TempFolder -WindowsKitsInstall $WindowsKitsInstall -UpdateBootWIM $UpdateBootWIM -MakeUSBMedia $CreateUSB -MakeISOMedia $CreateISO
+Update-Win10WIM -SourcePath $SourcePath -SourceName $OSSKU -ServicingStack $ServicingStack -CumulativeUpdate $CumulativeUpdate -DotNet35 $DotNet35 -CumulativeDotNetUpdate $CumulativeDotNetUpdate -AdobeFlashUpdate $AdobeFlashUpdate -ImageMountFolder $ImageMountFolder -BootImageMountFolder $BootImageMountFolder -WinREImageMountFolder $WinREImageMountFolder -TempFolder $TempFolder -WindowsKitsInstall $WindowsKitsInstall -UpdateBootWIM $UpdateBootWIM -MakeUSBMedia $CreateUSB -MakeISOMedia $CreateISO -CMAddWIM $CMWIMImport
+
+<# Import WIMs into Configuration Manager
+If($CMWIMImport){
+    Import-WIMtoCM
+} #>
 
 
 # Determine ending time

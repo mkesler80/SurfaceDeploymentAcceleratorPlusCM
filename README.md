@@ -11,6 +11,7 @@ Please use this GitHub Repos issue tracking capability to raise issues or featur
  - If you download the contents of this repository as a ZIP file from github.com on a Windows system, please right-click on the downloaded .zip file and select Properties, then check the "Unblock" box, and then click OK.  ONLY THEN IS IT SAFE TO UNZIP THE FILE - If you do not do this, your deployments *will* fail.
 **************************************************************************************************************************************************************************************************************************************************************************************************************
  - Windows 10 2004 or newer environment to run the script.
+ - The Configuration Manager Admin Console must be installed.
  - Internet Explorer "first run experience" must have been completed in environment where script is run (you must run Internet Explorer once, otherwise driver/firmware and other downloads *will* fail and the script will throw errors indicating you have not run IE once in that environment before downloads will work properly).
  - Internet access from machine/environment where script is run (to download drivers and Office 365 - internet access is not required to use the image to (re)image devices, but is *strongly* recommended during that process as well).
  - The script must be run with administrative privileges to succeed.
@@ -34,6 +35,9 @@ Please use this GitHub Repos issue tracking capability to raise issues or featur
 
 - To create an image WITHOUT DotNet 3.5 or Office 365 C2R installed for a Surface Pro 7:
     X:\SurfaceDeploymentAccelerator\CreateSurfaceWindowsImage.ps1 -ISO "X:\en_windows_10_business_editions_version_2004_x64_dvd_d06ef8c5.iso" -OSSKU Pro -DestinationFolder C:\Output -Device SurfacePro7 -DotNet35 $false -Office365 $false
+
+- To create an image and have the generated boot image and OS image added to a Configuration Manager Site
+    X:\SurfaceDeploymentAccelerator\CreateSurfaceWindowsImage.ps1 -ISO "X:\en_windows_10_business_editions_version_2004_x64_dvd_d06ef8c5.iso" -OSSKU "Enterprise" -DestinationFolder C:\Output -Device SurfacePro7 -CMWIMImport $True -CMSiteCode LAB -CMSiteServer "primarysite.lab.lab" -CMFileShare "\\primarysite\share$" -CreateUSB $False
 
  - Once the script writes the image to the selected USB drive and has completed, take the resulting USB key to the device, and boot to it.  This will image the device and leave the device waiting in OOBE once complete.
  - To (re)image another device of the same type, simply use this USB key to (re)image that device as well.
@@ -95,3 +99,11 @@ The parameters that are supported to configure for the script are as follows:
  -UseLocalDriverPath          Use a local driver path and skip downloading the latest MSI for Device, True or False.  False is default.  If this parameter is set, you must also set LocalDriverPath to a valid path containing the extracted drivers you wish to inject, or this will fail.
 
  -LocalDriverPath             Filesystem (accessible to this PowerShell instance) path containing drivers to use.  Only read if UseLocalDriverPath is set to True.
+
+ -CMWimImport                 Boolean value that tells the script whether or not to attempt WIM import default is $False - requires CM admin console installation
+
+ -CMSiteCode                  Site code where you want the WIMs imported to.  Null by default.
+
+ -CMSiteServer                Primary site server for the site code specified in CMSiteCode.  Null by default.
+
+ -CMFileShare                 File share where WIMs are stored.  Must be R+W accessible by the primary site server and the running the script. Will create a folder structure of ./SDA/$Device/OS and ./SDA/$Device/Boot on the share.  Null by default. 
