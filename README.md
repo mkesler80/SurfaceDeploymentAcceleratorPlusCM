@@ -37,7 +37,7 @@ Please use this GitHub Repos issue tracking capability to raise issues or featur
     X:\SurfaceDeploymentAccelerator\CreateSurfaceWindowsImage.ps1 -ISO "X:\en_windows_10_business_editions_version_2004_x64_dvd_d06ef8c5.iso" -OSSKU Pro -DestinationFolder C:\Output -Device SurfacePro7 -DotNet35 $false -Office365 $false
 
 - To create an image and have the generated boot image and OS image added to a Configuration Manager Site
-    X:\SurfaceDeploymentAccelerator\CreateSurfaceWindowsImage.ps1 -ISO "X:\en_windows_10_business_editions_version_2004_x64_dvd_d06ef8c5.iso" -OSSKU "Enterprise" -DestinationFolder C:\Output -Device SurfacePro7 -CMWIMImport $True -CMSiteCode LAB -CMSiteServer "primarysite.lab.lab" -CMFileShare "\\primarysite\share$" -CreateUSB $False
+    X:\SurfaceDeploymentAccelerator\CreateSurfaceWindowsImage.ps1 -ISO "X:\en_windows_10_business_editions_version_2004_x64_dvd_d06ef8c5.iso" -OSSKU "Enterprise" -DestinationFolder C:\Output -Device SurfacePro7 -CMWIMImport $True -CMSiteCode LAB -CMSiteServer "primarysite.lab.lab" -CMFileShare "\\\primarysite\share$" -CreateUSB $False
 
  - Once the script writes the image to the selected USB drive and has completed, take the resulting USB key to the device, and boot to it.  This will image the device and leave the device waiting in OOBE once complete.
  - To (re)image another device of the same type, simply use this USB key to (re)image that device as well.
