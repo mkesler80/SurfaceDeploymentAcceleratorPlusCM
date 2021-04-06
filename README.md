@@ -96,14 +96,14 @@ The parameters that are supported to configure for the script are as follows:
 
  -KeepOriginalWIM:            Keep customized unsplit WIM even if resulting image size is greater than 4GB (images over 4GB are split into SWM by default), True or False.  True is default.
 
- -UseLocalDriverPath          Use a local driver path and skip downloading the latest MSI for Device, True or False.  False is default.  If this parameter is set, you must also set LocalDriverPath to a valid path containing the extracted drivers you wish to inject, or this will fail.
+ -UseLocalDriverPath:          Use a local driver path and skip downloading the latest MSI for Device, True or False.  False is default.  If this parameter is set, you must also set LocalDriverPath to a valid path containing the extracted drivers you wish to inject, or this will fail.
 
- -LocalDriverPath             Filesystem (accessible to this PowerShell instance) path containing drivers to use.  Only read if UseLocalDriverPath is set to True.
+ -LocalDriverPath:             Filesystem (accessible to this PowerShell instance) path containing drivers to use.  Only read if UseLocalDriverPath is set to True.
 
- -CMWimImport                 Boolean value that tells the script whether or not to attempt WIM import default is $False - requires CM admin console installation
+ -CMWimImport:                Boolean value that tells the script whether or not to attempt WIM import default is $False - requires CM admin console installation
 
- -CMSiteCode                  Site code where you want the WIMs imported to.  Null by default.
+ -CMSiteCode:                  Site code where you want the WIMs imported to.  Null by default.
 
- -CMSiteServer                Primary site server for the site code specified in CMSiteCode.  Null by default.
+ -CMSiteServer:                Primary site server for the site code specified in CMSiteCode.  Null by default.
 
- -CMFileShare                 File share where WIMs are stored.  Must be R+W accessible by the primary site server and the running the script. Will create a folder structure of ./SDA/$Device/OS and ./SDA/$Device/Boot on the share.  Null by default. 
+ -CMFileShare:                 File share where WIMs are stored.  Must be R+W accessible by the primary site server and the running the script. Will create a folder structure of ./SDA/$Device/OS and ./SDA/$Device/Boot on the share.  Null by default. 
