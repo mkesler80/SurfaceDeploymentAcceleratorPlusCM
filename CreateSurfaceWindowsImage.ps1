@@ -9,7 +9,6 @@
     .\CreateSurfaceWindowsImage.ps1 -ISO <ISO path> -OSSKU Pro -DestinationFolder "C:\Temp" -Device SurfacePro7
 
 .NOTES
-<<<<<<< HEAD
     Author:       Matt Kesler
     Last Update:  5th April 2021
     Version:      1.2.5.6
@@ -17,14 +16,6 @@
     Version 1.2.5.6
     - Added Configuration Manager Boot and Install WIM import
     - New Parameters CMWIMImport, CMSiteCode, CMSiteServer, CMFileShare
-=======
-    Author:       Microsoft
-    Last Update:  6th May 2021
-    Version:      1.2.5.6
-
-    Version 1.2.5.6
-    - Added support for Surface Laptop 4
->>>>>>> upstream/master
 
     Version 1.2.5.5
     - Added support for Surface Pro 7+
